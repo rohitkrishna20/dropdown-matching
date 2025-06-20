@@ -1,5 +1,5 @@
 from flask import Flask, request, render_template
-from langchain.embeddings import OllamaEmbeddings
+from langchain_community.embeddings import OllamaEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.schema import Document
 import json

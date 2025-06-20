@@ -1,27 +1,31 @@
 from flask import Flask, request, render_template
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
 import json
 import os
 
 app = Flask(__name__)
 
+# Dropdown fields you want to match
 DROPDOWN_FIELDS = [
     "Name", "Account", "Sales Stage", "Primary Revenue Win Probability",
     "AI Score", "Total Value", "Source", "Expected Closure", "Created",
     "Status", "Opportunity Segment"
 ]
 
+# Load your data
 with open("data/DataRightHS.json", "r") as f:
     records = json.load(f)["items"]
 
+# Extract options for each dropdown field
 field_options = {}
 for field in DROPDOWN_FIELDS:
     options = set()
     for rec in records:
         val = rec.get(field)
 
+        # Handle special cases with fallback keys
         if not val and field == "Source":
             val = rec.get("Primary Source Name") or rec.get("Referral Source")
         if not val and field == "Total Value":
@@ -33,12 +37,17 @@ for field in DROPDOWN_FIELDS:
             options.add(str(val).strip())
     field_options[field] = list(options)
 
-embedding = OllamaEmbeddings(model="llama3.2")
+# Load the embedding model from Ollama
+embedding = OllamaEmbeddings(model="llama3:3.2")
 
-vectorstores = {
-    field: FAISS.from_documents([Document(page_content=opt) for opt in options], embedding)
-    for field, options in field_options.items()
-}
+# Build vectorstores safely (skip empty fields)
+vectorstores = {}
+for field, options in field_options.items():
+    if not options:
+        print(f"Skipping '{field}' — no options found.")
+        continue
+    docs = [Document(page_content=opt) for opt in options]
+    vectorstores[field] = FAISS.from_documents(docs, embedding)
 
 @app.route("/", methods=["GET", "POST"])
 def index():

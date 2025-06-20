@@ -38,7 +38,7 @@ for field in DROPDOWN_FIELDS:
     field_options[field] = list(options)
 
 # Initialize Ollama embedding model
-embedding = OllamaEmbeddings(model="llama3:3.2")
+embedding = OllamaEmbeddings(model="llama3.2")
 
 # Build vectorstores per field
 vectorstores = {}

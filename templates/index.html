@@ -1,1 +1,51 @@
-<!DOCTYPE HTML>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dropdown Field Matcher</title>
+  <style>
+    body {
+      font-family: Arial;
+      margin: 40px;
+    }
+    input, select, button {
+      padding: 10px;
+      margin: 10px 0;
+    }
+    .response-box {
+      margin-top: 30px;
+      padding: 20px;
+      background-color: #f0f0f0;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+    }
+    .match-item {
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Ask a Question About Dropdown Options</h2>
+
+  <form method="POST">
+    <input type="text" name="query" placeholder="Type your query..." value="{{ query }}" size="60" required>
+    <select name="field" required>
+      <option value="" disabled selected>Select a field</option>
+      {% for f in fields %}
+        <option value="{{ f }}" {% if selected_field == f %}selected{% endif %}>{{ f }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Submit</button>
+  </form>
+
+  {% if results %}
+  <div class="response-box">
+    <h3>Top Matches for "{{ query }}" in "{{ selected_field }}"</h3>
+    {% for r in results %}
+      <div class="match-item">
+        <strong>{{ r.value }}</strong> — Score: {{ r.score }}
+      </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</body>
+</html>

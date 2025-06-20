@@ -7,18 +7,15 @@ import os
 
 app = Flask(__name__)
 
-# Fields shown on the webpage
 DROPDOWN_FIELDS = [
     "Name", "Account", "Sales Stage", "Primary Revenue Win Probability",
     "AI Score", "Total Value", "Source", "Expected Closure", "Created",
     "Status", "Opportunity Segment"
 ]
 
-# Load JSON data
 with open("data/DataRightHS.json", "r") as f:
     records = json.load(f)["items"]
 
-# Extract dropdown values for each field
 field_options = {}
 for field in DROPDOWN_FIELDS:
     options = set()
@@ -36,10 +33,8 @@ for field in DROPDOWN_FIELDS:
             options.add(str(val).strip())
     field_options[field] = list(options)
 
-# Embed with Ollama llama3:3.2
 embedding = OllamaEmbeddings(model="llama3:3.2")
 
-# Create FAISS vector store
 vectorstores = {
     field: FAISS.from_documents([Document(page_content=opt) for opt in options], embedding)
     for field, options in field_options.items()

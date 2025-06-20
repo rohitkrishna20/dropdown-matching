@@ -33,7 +33,7 @@ for field in DROPDOWN_FIELDS:
             options.add(str(val).strip())
     field_options[field] = list(options)
 
-embedding = OllamaEmbeddings(model="llama3:3.2")
+embedding = OllamaEmbeddings(model="llama3.2")
 
 vectorstores = {
     field: FAISS.from_documents([Document(page_content=opt) for opt in options], embedding)

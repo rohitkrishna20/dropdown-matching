@@ -90,5 +90,5 @@ def get_matches(query):
     return top
 
 if __name__ == "__main__":
-    print("🚀 Running with Ollama model: llama3.2")
+    print("Running with Ollama model: llama3.2")
     app.run(debug=True)

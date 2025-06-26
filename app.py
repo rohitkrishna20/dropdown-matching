@@ -1,79 +1,78 @@
-from flask import Flask, request, render_template
-from langchain_ollama import OllamaEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
+from flask import Flask, request, render_template, jsonify
 import json
 import os
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
-# Define dropdown fields of interest
-DROPDOWN_FIELDS = [
-    "Name", "Account", "Sales Stage", "Primary Revenue Win Probability",
-    "AI Score", "Total Value", "Source", "Expected Closure", "Created",
-    "Status", "Opportunity Segment"
-]
+# Load your dataset
+with open("DataRightHS.json", "r", encoding="utf-8") as f:
+    raw_data = json.load(f)
+records = raw_data.get("items", [])
 
-# Load JSON data
-with open("data/DataRightHS.json", "r") as f:
-    records = json.load(f)["items"]
+# Extract unique keys and their sample values (only non-empty strings)
+key_samples = {}
+for row in records:
+    for key, val in row.items():
+        if isinstance(val, str) and val.strip():
+            key_samples.setdefault(key, val)
 
-# Extract options for each field
-field_options = {}
-for field in DROPDOWN_FIELDS:
-    options = set()
-    for rec in records:
-        val = rec.get(field)
+# Create LangChain documents for each key
+docs = [Document(page_content=key) for key in key_samples.keys()]
 
-        # Fallbacks for missing keys
-        if not val and field == "Source":
-            val = rec.get("Primary Source Name") or rec.get("Referral Source")
-        if not val and field == "Total Value":
-            val = rec.get("Primary Revenue Amount") or rec.get("Annual Revenue") or rec.get("Debt")
-        if not val and field == "AI Score":
-            val = rec.get("Growth%")
-
-        if val:
-            options.add(str(val).strip())
-    field_options[field] = list(options)
-
-# Initialize Ollama embedding model
+# Create embeddings using Ollama Llama3.2
 embedding = OllamaEmbeddings(model="llama3.2")
+vectorstore = FAISS.from_documents(docs, embedding)
 
-# Build vectorstores per field
-vectorstores = {}
-
-for field, options in field_options.items():
-    if not options:
-        print(f"Skipping '{field}' — no options found.")
-        continue
-
-    # Label each entry to give LLM context
-    labeled_options = [f"{field}: {opt}" for opt in options]
-
-    # Log for debugging
-    print(f"\nIndexing field: {field} ({len(labeled_options)} items)")
-    for entry in labeled_options:
-        print(" -", entry)
-
-    docs = [Document(page_content=entry) for entry in labeled_options]
-    vectorstores[field] = FAISS.from_documents(docs, embedding)
+# All available headers from the Figma interface
+figma_headers = [
+    "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
+    "Total value", "Source", "Expected closure", "Created", "Alerts"
+]
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    results = []
-    query = ""
-    selected_field = ""
-    if request.method == "POST":
-        query = request.form.get("query")
-        selected_field = request.form.get("field")
-        if selected_field in vectorstores:
-            matches = vectorstores[selected_field].similarity_search_with_score(query, k=3)
-            for doc, score in matches:
-                clean_text = doc.page_content.replace(f"{selected_field}: ", "")
-                results.append({"value": clean_text, "score": f"{score:.3f}"})
+    header = None
+    matches = []
+    selected = None
 
-    return render_template("index.html", fields=DROPDOWN_FIELDS, results=results, query=query, selected_field=selected_field)
+    if request.method == "POST":
+        if "selected_match" in request.form:
+            selected = request.form["selected_match"]
+            header = request.form["header"]
+            matches = get_matches(header)
+        else:
+            header = request.form.get("header")
+            matches = get_matches(header)
+
+    return render_template("index.html", header=header, matches=matches, selected=selected)
+
+@app.route("/api/match", methods=["POST"])
+def api_match():
+    data_in = request.json
+    header = data_in.get("header", "")
+    if not header:
+        return jsonify({"error": "Missing 'header' in request"}), 400
+
+    matches = get_matches(header)
+    return jsonify({
+        "header": header,
+        "matches": matches
+    })
+
+def get_matches(query):
+    results = vectorstore.similarity_search(query, k=5)
+    final = []
+    for doc in results:
+        key = doc.page_content
+        sample = key_samples.get(key, "")
+        if sample.strip():
+            final.append({"field": key, "value": sample})
+        if len(final) == 3:
+            break
+    return final
 
 if __name__ == "__main__":
     app.run(debug=True)

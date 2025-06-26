@@ -1,29 +1,35 @@
 from flask import Flask, request, render_template, jsonify
 import json
-import os
-from langchain_community.embeddings import OllamaEmbeddings
+from pathlib import Path
+from langchain_ollama import OllamaEmbeddings  # ✅ NEW import location
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
-with open("data/DataRightHS.json", "r", encoding="utf-8") as f:
+# Load dataset
+DATA_PATH = Path("data/DataRightHS.json")
+with DATA_PATH.open(encoding="utf-8") as f:
     raw_data = json.load(f)
 
-# If the data is nested under "items", extract it
+# Extract records
 records = raw_data.get("items", raw_data)
 
+# Extract unique, non-empty key samples
 key_samples = {}
 for row in records:
     for key, val in row.items():
         if isinstance(val, str) and val.strip():
-            key_samples.setdefault(key, val)
+            key_samples.setdefault(key, val.strip())
 
+# Build LangChain documents
 docs = [Document(page_content=key) for key in key_samples]
 
-embedding = OllamaEmbeddings(model="llama3.2")
+# Create FAISS vector store with Ollama llama3.2
+embedding = OllamaEmbeddings(model="llama3.2")  # ✅ using your model
 vectorstore = FAISS.from_documents(docs, embedding)
 
+# Figma column headers
 figma_headers = [
     "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
     "Total value", "Source", "Expected closure", "Created", "Alerts"
@@ -48,7 +54,7 @@ def index():
 
 @app.route("/api/match", methods=["POST"])
 def api_match():
-    data_in = request.json
+    data_in = request.get_json(force=True, silent=True) or {}
     header = data_in.get("header", "")
     if not header:
         return jsonify({"error": "Missing 'header' in request"}), 400
@@ -79,4 +85,5 @@ def get_matches(query):
     return final
 
 if __name__ == "__main__":
+    print("🚀 Running with Ollama model: llama3.2")
     app.run(debug=True)

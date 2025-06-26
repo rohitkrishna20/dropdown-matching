@@ -7,20 +7,17 @@ from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
-# Load dataset on startup for UI usage
 DATA_PATH = Path("data/DataRightHS.json")
 with DATA_PATH.open(encoding="utf-8") as f:
     raw_data = json.load(f)
 records = raw_data.get("items", raw_data)
 
-# Extract key samples
 key_samples = {}
 for row in records:
     for key, val in row.items():
         if isinstance(val, str) and val.strip():
             key_samples.setdefault(key, val.strip())
 
-# Vector store from static RHS keys
 docs = [Document(page_content=key) for key in key_samples]
 embedding = OllamaEmbeddings(model="llama3.2")
 vectorstore = FAISS.from_documents(docs, embedding)

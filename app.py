@@ -7,29 +7,23 @@ from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
-# Load dataset
 DATA_PATH = Path("data/DataRightHS.json")
 with DATA_PATH.open(encoding="utf-8") as f:
     raw_data = json.load(f)
 
-# Extract records
 records = raw_data.get("items", raw_data)
 
-# Extract unique, non-empty key samples
 key_samples = {}
 for row in records:
     for key, val in row.items():
         if isinstance(val, str) and val.strip():
             key_samples.setdefault(key, val.strip())
 
-# Build LangChain documents
 docs = [Document(page_content=key) for key in key_samples]
 
-# Create FAISS vector store with Ollama llama3.2
 embedding = OllamaEmbeddings(model="llama3.2")  # ✅ using your model
 vectorstore = FAISS.from_documents(docs, embedding)
 
-# Figma column headers
 figma_headers = [
     "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
     "Total value", "Source", "Expected closure", "Created", "Alerts"
@@ -72,5 +66,5 @@ def get_matches(query):
     return final
 
 if __name__ == "__main__":
-    print("🚀 Running with Ollama model: llama3.2")
+    print("Running with Ollama model: llama3.2")
     app.run(debug=True)

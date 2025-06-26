@@ -1,71 +1,54 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Map Column Headers</title>
+  <title>Top 3 Matches for Figma Headers</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 30px; }
-    select, button {
-      margin: 10px 0;
-      padding: 10px;
-      font-size: 1em;
+    body {
+      font-family: Arial, sans-serif;
+      padding: 40px;
+      background-color: #f8f8f8;
+    }
+    h2 {
+      color: #333;
+    }
+    .header-section {
+      margin-bottom: 40px;
+      padding: 20px;
+      background-color: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     .match-box {
       padding: 10px;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      margin: 10px 0;
-      background: #f9f9f9;
+      background-color: #f2f2f2;
+      border-radius: 4px;
+      margin: 8px 0;
+      font-size: 0.95em;
     }
-    .selected {
-      margin-top: 20px;
-      padding: 15px;
-      background: #e6ffe6;
-      border: 2px solid #66cc66;
-      border-radius: 6px;
-      font-weight: bold;
+    .match-box strong {
+      color: #333;
     }
   </style>
 </head>
 <body>
 
-  <h2>Select a Figma Header</h2>
-  <form method="POST">
-    <label for="header">Figma Column:</label><br>
-    <select name="header" id="header">
-      <option value="Name">Name</option>
-      <option value="Account">Account</option>
-      <option value="Sales Stage">Sales Stage</option>
-      <option value="Win Probability">Win Probability</option>
-      <option value="AI Score">AI Score</option>
-      <option value="Total value">Total value</option>
-      <option value="Source">Source</option>
-      <option value="Expected closure">Expected closure</option>
-      <option value="Created">Created</option>
-      <option value="Alerts">Alerts</option>
-    </select><br>
-    <button type="submit">Find Top Matches</button>
-  </form>
+  <h2>Top 3 Matching Fields for Each Figma Header</h2>
 
-  {% if matches %}
-    <hr>
-    <h3>Top 3 Matches for "{{ header }}"</h3>
-    <form method="POST">
-      {% for match in matches %}
-        <div class="match-box">
-          <input type="radio" name="selected_match" value="{{ match.field }}" required>
-          <label><strong>{{ match.field }}</strong>: {{ match.value }}</label>
-        </div>
-      {% endfor %}
-      <input type="hidden" name="header" value="{{ header }}">
-      <button type="submit">Confirm Selection</button>
-    </form>
-  {% endif %}
-
-  {% if selected %}
-    <div class="selected">
-      You selected: <strong>{{ selected }}</strong>
+  {% for header, matches in all_matches.items() %}
+    <div class="header-section">
+      <h3>{{ header }}</h3>
+      {% if matches %}
+        {% for match in matches %}
+          <div class="match-box">
+            <strong>{{ match.field }}</strong>: {{ match.value }}
+          </div>
+        {% endfor %}
+      {% else %}
+        <p><em>No matches found.</em></p>
+      {% endif %}
     </div>
-  {% endif %}
+  {% endfor %}
 
 </body>
 </html>

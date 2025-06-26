@@ -28,7 +28,7 @@ docs = [Document(page_content=key) for key in key_samples]
 embedding = OllamaEmbeddings(model="llama3.2")
 vectorstore = FAISS.from_documents(docs, embedding)
 
-# Header labels (for UI dropdown)
+# Header labels (for UI dropdown or bulk matching)
 figma_headers = [
     "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
     "Total value", "Source", "Expected closure", "Created", "Alerts"
@@ -63,6 +63,13 @@ def api_match():
         "header": header,
         "matches": matches
     })
+
+@app.route("/api/match-all", methods=["GET"])
+def api_match_all():
+    result = {}
+    for header in figma_headers:
+        result[header] = get_matches(header)
+    return jsonify(result)
 
 def get_matches(query):
     results = vectorstore.similarity_search(query, k=5)

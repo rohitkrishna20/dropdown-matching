@@ -1,51 +1,71 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Dropdown Field Matcher</title>
+  <title>Map Column Headers</title>
   <style>
-    body {
-      font-family: Arial;
-      margin: 40px;
-    }
-    input, select, button {
-      padding: 10px;
+    body { font-family: Arial, sans-serif; padding: 30px; }
+    select, button {
       margin: 10px 0;
+      padding: 10px;
+      font-size: 1em;
     }
-    .response-box {
-      margin-top: 30px;
-      padding: 20px;
-      background-color: #f0f0f0;
-      border-radius: 6px;
+    .match-box {
+      padding: 10px;
       border: 1px solid #ccc;
+      border-radius: 6px;
+      margin: 10px 0;
+      background: #f9f9f9;
     }
-    .match-item {
-      margin-bottom: 10px;
+    .selected {
+      margin-top: 20px;
+      padding: 15px;
+      background: #e6ffe6;
+      border: 2px solid #66cc66;
+      border-radius: 6px;
+      font-weight: bold;
     }
   </style>
 </head>
 <body>
-  <h2>Ask a Question About Dropdown Options</h2>
 
+  <h2>Select a Figma Header</h2>
   <form method="POST">
-    <input type="text" name="query" placeholder="Type your query..." value="{{ query }}" size="60" required>
-    <select name="field" required>
-      <option value="" disabled selected>Select a field</option>
-      {% for f in fields %}
-        <option value="{{ f }}" {% if selected_field == f %}selected{% endif %}>{{ f }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit">Submit</button>
+    <label for="header">Figma Column:</label><br>
+    <select name="header" id="header">
+      <option value="Name">Name</option>
+      <option value="Account">Account</option>
+      <option value="Sales Stage">Sales Stage</option>
+      <option value="Win Probability">Win Probability</option>
+      <option value="AI Score">AI Score</option>
+      <option value="Total value">Total value</option>
+      <option value="Source">Source</option>
+      <option value="Expected closure">Expected closure</option>
+      <option value="Created">Created</option>
+      <option value="Alerts">Alerts</option>
+    </select><br>
+    <button type="submit">Find Top Matches</button>
   </form>
 
-  {% if results %}
-  <div class="response-box">
-    <h3>Top Matches for "{{ query }}" in "{{ selected_field }}"</h3>
-    {% for r in results %}
-      <div class="match-item">
-        <strong>{{ r.value }}</strong> — Score: {{ r.score }}
-      </div>
-    {% endfor %}
-  </div>
+  {% if matches %}
+    <hr>
+    <h3>Top 3 Matches for "{{ header }}"</h3>
+    <form method="POST">
+      {% for match in matches %}
+        <div class="match-box">
+          <input type="radio" name="selected_match" value="{{ match.field }}" required>
+          <label><strong>{{ match.field }}</strong>: {{ match.value }}</label>
+        </div>
+      {% endfor %}
+      <input type="hidden" name="header" value="{{ header }}">
+      <button type="submit">Confirm Selection</button>
+    </form>
   {% endif %}
+
+  {% if selected %}
+    <div class="selected">
+      You selected: <strong>{{ selected }}</strong>
+    </div>
+  {% endif %}
+
 </body>
 </html>

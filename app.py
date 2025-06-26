@@ -7,44 +7,39 @@ from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
+# Load dataset
 DATA_PATH = Path("data/DataRightHS.json")
 with DATA_PATH.open(encoding="utf-8") as f:
     raw_data = json.load(f)
 
+# Extract records
 records = raw_data.get("items", raw_data)
 
+# Extract unique, non-empty key samples
 key_samples = {}
 for row in records:
     for key, val in row.items():
         if isinstance(val, str) and val.strip():
             key_samples.setdefault(key, val.strip())
 
+# Build LangChain documents
 docs = [Document(page_content=key) for key in key_samples]
 
+# Create FAISS vector store with Ollama llama3.2
 embedding = OllamaEmbeddings(model="llama3.2")  # ✅ using your model
 vectorstore = FAISS.from_documents(docs, embedding)
 
+# Figma column headers
 figma_headers = [
     "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
     "Total value", "Source", "Expected closure", "Created", "Alerts"
 ]
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def index():
-    header = None
-    matches = []
-    selected = None
-
-    if request.method == "POST":
-        if "selected_match" in request.form:
-            selected = request.form["selected_match"]
-            header = request.form["header"]
-            matches = get_matches(header)
-        else:
-            header = request.form.get("header")
-            matches = get_matches(header)
-
-    return render_template("index.html", header=header, matches=matches, selected=selected, headers=figma_headers)
+    # Generate matches for all headers in one go
+    all_matches = {header: get_matches(header) for header in figma_headers}
+    return render_template("index.html", all_matches=all_matches, headers=figma_headers)
 
 @app.route("/api/match", methods=["POST"])
 def api_match():
@@ -61,9 +56,7 @@ def api_match():
 
 @app.route("/api/match-all", methods=["GET"])
 def api_match_all():
-    result = {}
-    for header in figma_headers:
-        result[header] = get_matches(header)
+    result = {header: get_matches(header) for header in figma_headers}
     return jsonify(result)
 
 def get_matches(query):

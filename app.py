@@ -7,26 +7,28 @@ from langchain.docstore.document import Document
 
 app = Flask(__name__)
 
-# Load your dataset
-with open("DataRightHS.json", "r", encoding="utf-8") as f:
+# Load your dataset from correct path
+with open("data/DataRightHS.json", "r", encoding="utf-8") as f:
     raw_data = json.load(f)
-records = raw_data.get("items", [])
 
-# Extract unique keys and their sample values (only non-empty strings)
+# If the data is nested under "items", extract it
+records = raw_data.get("items", raw_data)
+
+# Collect unique non-empty keys and their values
 key_samples = {}
 for row in records:
     for key, val in row.items():
         if isinstance(val, str) and val.strip():
             key_samples.setdefault(key, val)
 
-# Create LangChain documents for each key
-docs = [Document(page_content=key) for key in key_samples.keys()]
+# Create LangChain documents from keys
+docs = [Document(page_content=key) for key in key_samples]
 
-# Create embeddings using Ollama Llama3.2
+# Create FAISS vector store using Ollama model
 embedding = OllamaEmbeddings(model="llama3.2")
 vectorstore = FAISS.from_documents(docs, embedding)
 
-# All available headers from the Figma interface
+# Header labels (for UI dropdown)
 figma_headers = [
     "Name", "Account", "Sales Stage", "Win Probability", "AI Score",
     "Total value", "Source", "Expected closure", "Created", "Alerts"
@@ -47,7 +49,7 @@ def index():
             header = request.form.get("header")
             matches = get_matches(header)
 
-    return render_template("index.html", header=header, matches=matches, selected=selected)
+    return render_template("index.html", header=header, matches=matches, selected=selected, headers=figma_headers)
 
 @app.route("/api/match", methods=["POST"])
 def api_match():

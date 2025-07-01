@@ -17,6 +17,10 @@ This project helps match figma-style dropdown headers (LHS) to the most relevant
   ''' bash
 git clone https://github.com/rohitkrishna20/dropdown-matching.git
 cd dropdown-matching
+- create a virtual environment: 
+
+python3 -m venv venv
+source venv/bin/activate
 
   2. Install python dependencies
      - pip install -r requirements.txt

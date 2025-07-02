@@ -39,8 +39,8 @@ cd dropdown-matching
     
 ## Using Postman to Test
 
-- match all default headers: http://localhost:5000/api/match-all (no body required)
-- match one header: https//localhost:5000/api/match   (body):
+- match all default headers: http://127.0.0.1:5000/api/match-all (no body required)
+- match one header: https//127.0.0.1:5000/api/match   (body):
   
   {
     "header": "Account"

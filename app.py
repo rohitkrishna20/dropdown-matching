@@ -59,7 +59,7 @@ Strict Rules:
 - ❌ Do NOT include timestamps or date examples
 - ❌ Do NOT include repeated terms like “Opportunity”, “Activity”, “Quote”, “Lead”
 - ❌ Do not include duplicate values - every "header" key must have a unique field name. If any name repeats, reject it and pick a new one.
-- ❌ Avoid stage-related phrases, alerts, or row-level values
+- ❌ Avoid stage-related phrases, alerts, or row-level values such as "status"
 - ❌ Exclude anything that looks like data content instead of a label
 - ❌ Do NOT include any values that appear inside cells or badges (e.g. “Web”, “Direct Mail”)
 

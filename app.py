@@ -84,7 +84,7 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2",
                            messages=[{"role": "user", "content": prompt}])
-                raw = resp["message"]["content"]
+        raw = resp["message"]["content"]
 
         # Extract headers
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)

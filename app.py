@@ -67,7 +67,7 @@ Example:
   "header2": "___",
   "header3": "___",
   ...
-  "header10": "Alerts"
+  "header10": "___"
 }}
 
 Raw UI Text:

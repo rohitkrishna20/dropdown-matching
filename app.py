@@ -1,18 +1,15 @@
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 from pathlib import Path
 import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# 1. Load and parse the Figma JSON
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+# Load and process Figma-style JSON
+# ─────────────────────────────────────────────────────
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-# ─────────────────────────────────────────────
-# 2. Extract all text from visible UI elements
-# ─────────────────────────────────────────────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -21,60 +18,65 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         return cleaned.replace(".", "").isdigit()
 
     def walk(node: dict):
-        if node.get("type") == "TEXT":
-            txt = node.get("characters", "").strip()
-            if txt and not is_numeric(txt):
-                out.append(txt)
-        for child in node.get("children", []):
-            walk(child)
+        if isinstance(node, dict):
+            if node.get("type") == "TEXT":
+                txt = node.get("characters", "").strip()
+                if txt and not is_numeric(txt):
+                    out.append(txt)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # de-dupe while preserving order
+    return list(dict.fromkeys(out))  # de-dupe, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
-# ─────────────────────────────────────────────
-# 3. Construct Ollama prompt
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+# Create prompt for Ollama
+# ─────────────────────────────────────────────────────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-
     return f"""
-You are analyzing UI text from a Figma-based dashboard with a large structured table.
+You are analyzing raw UI text extracted from a sales dashboard built in Figma.
 
-Your goal is to extract exactly **10 column header labels** used in this data table.
+The dashboard includes a main data table, and your job is to identify the 10 most likely **column headers** in that table.
 
-✅ Only include labels used as headers for structured columns in the table.
+These column headers represent structured fields (like customer name, status, score, dates, etc.) and are used to label columns in the top row of a table.
 
-🚫 Do NOT include:
-• Navigation text, filters, or tabs
-• Buttons like "Create Quote"
-• Generic short labels (e.g. “Open”, “My”, “Web”)
-• Stage/status labels (e.g. “Qualify”, “Negotiation”, “Discovery”, “Leads”, “Opportunities”, “Activities”)
-• Timestamps, numeric-only values, or duplicate/near-duplicate terms
+🧠 Focus on identifying field names, not row values or UI labels.
 
-⭐ Focus on:
-• Labels that appear once
-• Appear aligned above multiple structured data rows
-• Usually 2–3 words long
-• Positioned across a horizontal row in the layout
+Strict Rules:
+- ✅ Include only descriptive field names used to label table columns
+- ❌ Exclude pipeline statuses (like “Qualify”, “Negotiation”, “Discovery”)
+- ❌ Exclude action buttons, tabs, filters, or navigation
+- ❌ Do NOT include timestamps or date formats
+- ❌ Do NOT include repeated single terms like “Opportunity”, “Activity”, “Quote”, “Lead”
+- ❌ Avoid stage-related text, metadata, or statuses
+- ❌ Avoid anything that appears more than once unless it's clearly a header
+- ❌ Do not include words that are generic like “Open”, “Primary”, or “Web”
 
-Return a valid JSON object in this format only:
+🎯 Return ONLY a JSON object with keys "header1" through "header10"
+
+Example:
 {{
-  "header1": "...",
-  "header2": "...",
+  "header1": "Name",
+  "header2": "Account",
+  "header3": "AI Score",
   ...
-  "header10": "..."
+  "header10": "Alerts"
 }}
 
-Text from the UI:
-------------------
+Raw UI Text:
+------------
 {blob}
 """.strip()
 
-# ─────────────────────────────────────────────
-# 4. API endpoint to fetch top 10 headers
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+# API endpoint
+# ─────────────────────────────────────────────────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -84,8 +86,10 @@ def api_top10():
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
+        # Extract JSON object like {"header1": "...", ..., "header10": "..."}
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
         output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
+
         return jsonify(output)
 
     except Exception as e:
@@ -95,16 +99,13 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ─────────────────────────────────────────────
-# 5. Home route
-# ─────────────────────────────────────────────
 @app.get("/")
 def home():
-    return jsonify({"message": "GET /api/top10 to extract column headers from Figma UI"})
+    return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 
-# ─────────────────────────────────────────────
-# 6. Run the app
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+# Run the app
+# ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("🔁 Running Flask app to extract headers using Ollama…")
+    print("🚀 Running with enhanced pattern-based prompt for column header extraction...")
     app.run(debug=True)

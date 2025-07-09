@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
 import json
 from pathlib import Path
+import ollama
 
 app = Flask(__name__)
 
@@ -9,9 +10,9 @@ LHS_PATH = Path("data/FigmaLeftHS.json")
 with LHS_PATH.open(encoding="utf-8") as f:
     lhs_data = json.load(f)
 
-# ---------- Extract Headers ----------
-def extract_figma_headers(figma_json: dict, header_keywords=None):
-    headers = []
+# ---------- Extract all visible UI text ----------
+def extract_figma_text(figma_json: dict):
+    text_nodes = []
 
     def _is_mostly_numeric(text):
         cleaned = text.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -20,28 +21,53 @@ def extract_figma_headers(figma_json: dict, header_keywords=None):
     def _crawl(node):
         if node.get("type") == "TEXT" and node.get("characters", "").strip():
             txt = node["characters"].strip()
-            if _is_mostly_numeric(txt):
-                return  # Ignore numeric headers
-            if not header_keywords or any(kw.lower() in txt.lower() for kw in header_keywords):
-                headers.append(txt)
+            if not _is_mostly_numeric(txt):
+                text_nodes.append(txt)
         for child in node.get("children", []):
             _crawl(child)
 
     _crawl(figma_json)
-    return list(dict.fromkeys(headers))  # Deduplicate, preserve order
+    return list(dict.fromkeys(text_nodes))  # deduplicated, ordered
 
-figma_headers = extract_figma_headers(lhs_data)
+ui_text = extract_figma_text(lhs_data)
 
-# ---------- Routes ----------
+# ---------- Generate prompt ----------
+def generate_top9_prompt(text_items: list[str]) -> str:
+    header_blob = "\n".join(f"- {h}" for h in text_items)
+
+    return f"""
+You are analyzing all visible text extracted from a Figma-based business dashboard UI.
+
+From the following list of text items, return the **9 most important and general UI headers** that likely represent meaningful data fields, columns, or metrics.
+
+Avoid numeric-only values or minor UI counters (e.g. “13”, “2”, “6”). Pick items that are broad, high-level indicators of business-relevant content.
+
+Text items:
+-----------
+{header_blob}
+
+Output only a ranked JSON array of the 9 best items as:
+{{
+  "top_headers": ["...", "...", "..."]
+}}
+""".strip()
+
+# ---------- /api/top9 route ----------
+@app.route("/api/top9", methods=["GET"])
+def api_top9():
+    prompt = generate_top9_prompt(ui_text)
+    response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
+    return jsonify({
+        "prompt": prompt,
+        "top_9": response['message']['content']
+    })
+
+# ---------- Root route (optional) ----------
 @app.route("/", methods=["GET"])
-def index():
-    return render_template("index.html", headers=figma_headers)
+def home():
+    return jsonify({"message": "Use /api/top9 to extract top headers from Figma UI."})
 
-@app.route("/api/headers", methods=["GET"])
-def api_headers():
-    return jsonify({"headers": figma_headers, "count": len(figma_headers)})
-
-# ---------- Run Server ----------
+# ---------- Start the app ----------
 if __name__ == "__main__":
-    print("Running UI-header extractor (Figma only, numeric headers skipped)")
+    print("Running Ollama-driven Figma header extractor...")
     app.run(debug=True)

@@ -4,9 +4,7 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────────────
-# Load and process Figma-style JSON
-# ─────────────────────────────────────────────────────
+
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
@@ -34,9 +32,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 
 ui_text = extract_figma_text(lhs_data)
 
-# ─────────────────────────────────────────────────────
-# Create prompt for Ollama
-# ─────────────────────────────────────────────────────
+
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -65,9 +61,9 @@ Example:
 {{
   "header1": "Name",
   "header2": "Account",
-  "header3": "AI Score",
+  "header3": "___",
   ...
-  "header10": "Alerts"
+  "header10": "___"
 }}
 
 Raw UI Text:
@@ -75,9 +71,7 @@ Raw UI Text:
 {blob}
 """.strip()
 
-# ─────────────────────────────────────────────────────
-# API endpoint
-# ─────────────────────────────────────────────────────
+
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -87,11 +81,10 @@ def api_top10():
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Extract headers
+       
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
         cleaned = [h.strip() for h in headers]
 
-        # Manual fix (targeted replacement)
         corrected = []
         for h in cleaned:
             if h.lower() == "leads":
@@ -116,9 +109,7 @@ def api_top10():
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 
-# ─────────────────────────────────────────────────────
-# Run the app
-# ─────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    print("🚀 Running with enhanced pattern-based prompt for column header extraction...")
+    print("Running with enhanced pattern-based prompt for column header extraction...")
     app.run(debug=True)

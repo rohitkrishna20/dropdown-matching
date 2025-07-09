@@ -56,6 +56,8 @@ Do not include:
 - Tabs, filters, or navigational UI elements
 - Numeric-only values or date-like values
 - Duplicate or semantically overlapping column labels (e.g. avoid including both "Expected Closure" and "Due to closure")
+- Anything with similar names - ex: closure and Closure must not be in the output 
+- created on and created as well - ONLY PICK ONE!
 
 Return ONLY a valid JSON list of **10 unique column headers**, like:
 ["___", "___", "___", "Total", "Expected Closure", ...]

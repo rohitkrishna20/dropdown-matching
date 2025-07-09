@@ -1,8 +1,6 @@
 from flask import Flask, jsonify
 from pathlib import Path
-import json
-import ollama
-import re
+import json, re, ollama
 
 app = Flask(__name__)
 
@@ -16,11 +14,11 @@ with LHS_PATH.open(encoding="utf-8") as f:
 # ─────────────────────────────────────────────
 # 2. Extract visible text (skip numeric-only)
 # ─────────────────────────────────────────────
-def extract_figma_text(figma_json: dict):
+def extract_figma_text(figma_json: dict) -> list[str]:
     labels = []
 
-    def _is_numeric(text: str) -> bool:
-        cleaned = text.replace(",", "").replace("%", "").replace("$", "").strip()
+    def _is_numeric(t: str) -> bool:
+        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
         return cleaned.replace(".", "").isdigit()
 
     def _walk(node: dict):
@@ -32,47 +30,31 @@ def extract_figma_text(figma_json: dict):
             _walk(child)
 
     _walk(figma_json)
-    return list(dict.fromkeys(labels))
+    return list(dict.fromkeys(labels))   # unique, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
 # ─────────────────────────────────────────────
-# 3. Build prompt with built-in exclusions
+# 3. Build prompt (excludes bad row values)
 # ─────────────────────────────────────────────
 def make_prompt_top10(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-
     return f"""
 You are analyzing UI text extracted from a Figma-based sales dashboard.
 
-The design includes a structured data table with labeled columns.
+This design contains a structured data table with labeled columns.
 
-🎯 Task: Choose the **10 most likely table column headers** from the list below.
+🎯 Task: Pick the **10 best column headers** from the list below.
 
-These headers should represent structured, high-level fields like:
-- Name, Account
+❌ Never include:
+   - "Qualify"           - "Negotiation" / "Negotation"
+   - "Discovery"         - "Sales Visit"
+   - "Direct Mail"       - "Timestamp"
 
-❌ Do NOT include any of the following row values or unrelated items:
-- "Qualify"
-- "Qualified"
-- "Negotiation"
-- "Negotation"
-- "Discovery"
-- "Sales Visit"
-- "Direct Mail"
-- "Timestamp"
+❌ Ignore navigation items, action buttons, section titles, and numeric-only strings.
 
-❌ Also ignore:
-- Navigation items, action buttons, and section titles (e.g. “Overview”)
-- Numeric-only strings (like “11”, “13”, “2”)
-
-✅ Return only the most semantically meaningful **column names**.
-
-Output format (strict):
------------------------
-A single JSON list, exactly 10 items, like this:
-
-["Name", "Account", "Created", "Total Value", "AI Score", ..., "Alerts"]
+Return **only** a JSON list (exactly 10 items), e.g.:
+["___", "___", "___", "___", ..., "name"]
 
 UI Text:
 --------
@@ -87,26 +69,36 @@ def api_top10():
     prompt = make_prompt_top10(ui_text)
 
     try:
-        response = ollama.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = response["message"]["content"]
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
+        raw  = resp["message"]["content"]
 
-        # Extract the first JSON array (["..."]) from the text using regex
+        # Grab first JSON array of 10 strings
         match = re.search(r"\[\s*\".*?\"\s*(,\s*\".*?\"\s*){9}\]", raw, re.DOTALL)
         if not match:
-            raise ValueError("Could not extract a 10-item list from Ollama response.")
-        
-        header_list = json.loads(match.group(0))
+            raise ValueError("Could not find a 10-item JSON list in Ollama output.")
+        headers = json.loads(match.group(0))       # list[str]
 
-        return jsonify({"top_10": header_list})
+        # ── Deduplicate by keyword overlap ──
+        deduped, seen = [], set()
+        for label in headers:
+            words = set(re.findall(r"\w+", label.lower()))
+            if seen & words:           # any overlap? → skip
+                continue
+            deduped.append(label)
+            seen |= words
+
+        # Pad to exactly 10 slots
+        while len(deduped) < 10:
+            deduped.append("")
+
+        return jsonify({"top_10": deduped})
 
     except Exception as e:
         return jsonify({
             "error": "Failed to parse Ollama response",
             "details": str(e),
-            "raw_response": response["message"]["content"] if 'response' in locals() else "No response"
+            "raw_response": resp["message"]["content"] if 'resp' in locals() else "No response"
         }), 500
 
 # ─────────────────────────────────────────────
@@ -114,11 +106,11 @@ def api_top10():
 # ─────────────────────────────────────────────
 @app.get("/")
 def home():
-    return jsonify({"message": "GET /api/top10 to extract column headers from Figma UI"})
+    return jsonify({"message": "GET /api/top10 to extract column headers"})
 
 # ─────────────────────────────────────────────
-# 6. Run the app
+# 6. Run
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Running Ollama-powered header extractor (prompt-based filtering only)…")
+    print("Header-extractor running (prompt filtering + keyword de-dup)…")
     app.run(debug=True)

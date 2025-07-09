@@ -1,19 +1,14 @@
 from flask import Flask, jsonify
 from pathlib import Path
-from collections import Counter
 import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# 1. Load Figma JSON and extract visible text
-# ─────────────────────────────────────────────
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
 def extract_figma_text(figma_json: dict) -> list[str]:
-    """Return UI text that appears exactly once (likely column headers)."""
-    all_strings = []
+    out = []
 
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -23,22 +18,15 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         if node.get("type") == "TEXT":
             txt = node.get("characters", "").strip()
             if txt and not is_numeric(txt):
-                all_strings.append(txt)
+                out.append(txt)
         for child in node.get("children", []):
             walk(child)
 
     walk(figma_json)
-
-    # Keep first occurrence order, but only strings that appear once
-    counts = Counter(all_strings)
-    dedup_ordered = list(dict.fromkeys(all_strings))
-    return [s for s in dedup_ordered if counts[s] == 1]
+    return list(dict.fromkeys(out))  # de-dupe, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
-# ─────────────────────────────────────────────
-# 2. Prompt builder (no hard-coded headers)
-# ─────────────────────────────────────────────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -48,38 +36,31 @@ This dashboard contains one main table with a single row of column headers follo
 
 🎯 Extract **exactly 10 unique column-header labels**.
 
-Traits of true column headers
-• They appear **only once** in the UI (row values & navigation labels repeat)  
-• They label structured data fields, not statuses or steps  
-• They are longer than 2 characters and context-specific  
-• They are not navigation/menu items, actions, timestamps, or badges
+Traits of true column headers:
+• Appear **only once** in the UI
+• Sit directly above structured rows of business data
+• Often label numeric or structured values (like $ amounts, scores, statuses)
+• Are **not** page sections, navigation titles, or summaries (e.g. "My To-do's", "Overview", "Subtitle")
+• Are **not** generic or vague (like "Primary", "Value", or "Open Opportunities")
+• Are typically **not action buttons**, filters, or sections
 
-🔒 Rules
-• ✅ Return only field labels that fit the traits above  
-• ❌ Exclude anything that appears in multiple places (e.g. nav words or statuses)  
-• ❌ Skip contact methods, generic terms, or short/ambiguous words  
-• ❌ No duplicates or near-duplicates
-
-🧪 Output
-Return **only** a valid JSON object with keys "header1" … "header10":
+🧪 Output format:
+Return only a valid JSON object with keys "header1" through "header10":
 
 {{
-  "header1": "...",
-  "header2": "...",
-  …
-  "header10": "..."
+  "header1": "Name",
+  "header2": "Account",
+  ...
+  "header10": "Expected Closure"
 }}
 
-Do NOT add markdown or commentary.
+No markdown. No commentary. Just valid JSON.
 
-UI text candidates
+UI Text Candidates
 ------------------
 {blob}
 """.strip()
 
-# ─────────────────────────────────────────────
-# 3. /api/top10 endpoint
-# ─────────────────────────────────────────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -91,19 +72,11 @@ def api_top10():
         )
         raw = resp["message"]["content"]
 
-        # A) Preferred: "headerN": "Value"
+        # Extract "headerX": "..." lines
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
 
-        # B) Fallback: numbered list 1. "Value"
-        if not headers:
-            headers = re.findall(r'\d+\.\s*"([^"]+)"', raw)
-
-        # C) Fallback: any quoted strings
-        if not headers:
-            headers = re.findall(r'"([^"]{3,}?)"', raw)
-
-        headers = headers[:10] + [""] * (10 - len(headers))
-        return jsonify({f"header{i+1}": h for i, h in enumerate(headers)})
+        return jsonify(output)
 
     except Exception as e:
         return jsonify({
@@ -112,12 +85,10 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ─────────────────────────────────────────────
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract column headers"})
 
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Running with unique-label filtering and robust parsing…")
+    print("Running with improved filtering…")
     app.run(debug=True)

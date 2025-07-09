@@ -49,7 +49,7 @@ The design contains a structured **data table** with column headers (like a spre
 🎯 Task: choose the **10 most likely table column headers** from the list below.
 
 ❗ Only include labels that describe table **columns**.  
-❌ Do NOT include row values such as sales-stage names (“Negotiation”, “Discovery”, etc.).  
+❌ Do NOT include row values such as sales-stage names (“Negotation”, “Discovery”, "Qualify" , etc.).  
 ❌ Skip section titles (“Sales Dashboard”, “Overview”), navigation items, action buttons, or numeric counters.
 
 UI text:

@@ -1,91 +1,94 @@
 from flask import Flask, jsonify
 from pathlib import Path
-from collections import Counter
 import json, re, ollama
+from collections import Counter
 
 app = Flask(__name__)
 
-# ─────────── 1. Load Figma JSON ───────────
-lhs_path = Path("data/FigmaLeftHS.json")
-lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
+# ─────────────────────────────────────────────
+# 1. Load Figma JSON once
+# ─────────────────────────────────────────────
+FIGMA_JSON = Path("data/FigmaLeftHS.json").read_text(encoding="utf-8")
+figma_data  = json.loads(FIGMA_JSON)
 
-# ─────────── 2. Extract text once-only & >2 chars ───────────
-def extract_figma_text(figma_json: dict) -> list[str]:
-    strings = []
+# ─────────────────────────────────────────────
+# 2. Crawl for visible text + frequencies
+# ─────────────────────────────────────────────
+def crawl_text(node: dict, collector: list[str]):
+    if node.get("type") == "TEXT":
+        txt = node.get("characters", "").strip()
+        if txt:
+            # drop pure numbers / money / % (very common in rows)
+            stripped = txt.replace(",", "").replace("$", "").replace("%", "")
+            if not stripped.replace(".", "").isdigit():
+                collector.append(txt)
+    for child in node.get("children", []):
+        crawl_text(child, collector)
 
-    def is_numeric(t: str) -> bool:
-        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
-        return cleaned.replace(".", "").isdigit()
+all_strings: list[str] = []
+crawl_text(figma_data, all_strings)
 
-    def walk(node: dict):
-        if node.get("type") == "TEXT":
-            t = node.get("characters", "").strip()
-            if t and not is_numeric(t):
-                strings.append(t)
-        for c in node.get("children", []):
-            walk(c)
+freq = Counter(all_strings)
+appear_once = [s for s in all_strings if freq[s] == 1]          # singletons, in original order
 
-    walk(figma_json)
-    counts = Counter(strings)
-    ordered_unique = list(dict.fromkeys(strings))
-    # keep length>2 & appears <=1  (nav/status often repeats; row values often short)
-    return [s for s in ordered_unique if len(s) > 2 and counts[s] == 1]
-
-ui_text = extract_figma_text(lhs_data)
-
-# ─────────── 3. Prompt builder ───────────
-def make_prompt(labels: list[str]) -> str:
-    blob = "\n".join(f"- {t}" for t in labels)
+# ─────────────────────────────────────────────
+# 3. Build the prompt
+# ─────────────────────────────────────────────
+def build_prompt(candidates: list[str]) -> str:
+    bullet_blob = "\n".join(f"- {t}" for t in candidates)
     return f"""
-You are analyzing UI text extracted from a Figma sales dashboard.
+You are looking at UI text extracted from a Figma sales‐dashboard design.
 
-There is one main data table: a single header-row followed by many rows of values.
+**Facts you can rely on**
+• The main data table has one horizontal row of column headers (10 labels).  
+• Each header string appears **exactly once** in the entire design file.  
+• Navigation tabs, section titles, status chips, and row values repeat elsewhere.  
+• Headers are concise (2–3 words max), start with a capital letter, and sit above numeric / date data.
 
-🎯 Return **exactly 10 unique column-header labels**.
+**Your task**  
+Return a JSON object giving exactly 10 unique column-header labels chosen **only** from the list below.
+ • No values that repeat in the list below.  
+ • No near-duplicates or synonyms.  
+ • Skip strings shorter than 3 chars or obviously generic (“Open”, “Value”, “Action”, …).
 
-Headers:
-• Appear once (row values, nav items, and badges repeat)
-• Sit above structured numeric / textual data
-• Are not page sections, navigation, buttons, or pipeline **stage names** (e.g. “Qualify”, “Negotiation”, “Discovery”, “At Risk”)
-
-🔒 Exclude anything that is:
-• A pipeline/status/stage label
-• A navigation or section label (“Overview”, “My To-do's”, “Open opportunities”)
-• A short generic word (“Value”, “Primary”) or anything <3 characters
-• Repeated elsewhere in the UI text
-
-🧪 Output — return only JSON like:
+**Output – REQUIRED format (nothing else)**  
 {{
-  "header1": "...",
-  ...
-  "header10": "..."
+  "header1": "…",
+  "header2": "…",
+   ...
+  "header10": "…"
 }}
 
-No markdown, no commentary.
-
-UI text candidates
-------------------
-{blob}
+Candidate strings
+-----------------
+{bullet_blob}
 """.strip()
 
-# ─────────── 4. /api/top10 endpoint ───────────
+# ─────────────────────────────────────────────
+# 4. /api/top10 endpoint
+# ─────────────────────────────────────────────
 @app.get("/api/top10")
 def api_top10():
-    prompt = make_prompt(ui_text)
+    prompt = build_prompt(appear_once)
 
     try:
-        resp = ollama.chat(model="llama3.2",
-                           messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(
+            model="llama3.2",
+            messages=[{"role": "user", "content": prompt}]
+        )
         raw = resp["message"]["content"]
 
-        # A) proper "headerN": "Value"
-        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        # B) fallback quoted strings
-        if not headers:
-            headers = re.findall(r'"\s*([^"]{3,}?)\s*"', raw)
+        # Find the first {...} block that contains "header1"
+        match = re.search(r"\{[^{}]*\"header1\"[^{}]*\}", raw, re.DOTALL)
+        if not match:
+            raise ValueError("No header JSON object found in model response.")
 
-        headers = headers[:10] + [""]*(10-len(headers))
-        return jsonify({f"header{i+1}": h for i, h in enumerate(headers)})
+        obj_text = match.group(0)
+        headers_obj = json.loads(obj_text)
+
+        # Ensure we always deliver 10 keys (fill blanks if the model under-shoots)
+        result = {f"header{i}": headers_obj.get(f"header{i}", "") for i in range(1, 11)}
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({
@@ -94,10 +97,13 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
+# ─────────────────────────────────────────────
+# 5. Dev sanity route
+# ─────────────────────────────────────────────
 @app.get("/")
-def home():
-    return jsonify({"message": "GET /api/top10 to extract column headers"})
+def root():
+    return jsonify({"note": "GET /api/top10 to fetch table headers extracted by the LLM"})
 
 if __name__ == "__main__":
-    print("Running with stage-name ban & once-only filter …")
+    print("⇢ Running with freq-filtered candidate list…")
     app.run(debug=True)

@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import json
 from pathlib import Path
 import ollama
@@ -10,7 +10,7 @@ LHS_PATH = Path("data/FigmaLeftHS.json")
 with LHS_PATH.open(encoding="utf-8") as f:
     lhs_data = json.load(f)
 
-# ---------- Extract all visible UI text ----------
+# ---------- Extract visible UI text ----------
 def extract_figma_text(figma_json: dict):
     text_nodes = []
 
@@ -27,26 +27,35 @@ def extract_figma_text(figma_json: dict):
             _crawl(child)
 
     _crawl(figma_json)
-    return list(dict.fromkeys(text_nodes))  # deduplicated, ordered
+    return list(dict.fromkeys(text_nodes))  # de-duplicate
 
 ui_text = extract_figma_text(lhs_data)
 
-# ---------- Generate prompt ----------
+# ---------- Fine-Tuned Prompt ----------
 def generate_top9_prompt(text_items: list[str]) -> str:
     header_blob = "\n".join(f"- {h}" for h in text_items)
 
     return f"""
-You are analyzing all visible text extracted from a Figma-based business dashboard UI.
+You are analyzing all visible UI text extracted from a Figma-based **sales dashboard** design.
 
-From the following list of text items, return the **9 most important and general UI headers** that likely represent meaningful data fields, columns, or metrics.
+Your job is to find and return the **9 most meaningful data table column headers or field labels**.
+These labels will be used to extract structured data from the UI — so focus only on **table columns**, **key data values**, and **record-level fields**.
 
-Avoid numeric-only values or minor UI counters (e.g. “13”, “2”, “6”). Pick items that are broad, high-level indicators of business-relevant content.
+🔴 Ignore:
+- Navigation items (e.g. “Sales Dashboard”, “Overview”)
+- Action items (e.g. “Create Lead”, “View All”)
+- Channel names (e.g. “Sales visit”, “Direct mail”)
+- Section titles or UI tabs (e.g. “My Quotes”, “My Orders”)
 
-Text items:
------------
+✅ Focus on:
+- What a data engineer or analyst would consider a **data column**
+- Fields you’d expect to match to a database (e.g. “Name”, “Win Probability”, “Total Value”)
+
+Here is the list of all UI text extracted from the file:
+---------------------------------------------------------
 {header_blob}
 
-Output only a ranked JSON array of the 9 best items as:
+Return only a ranked list of the 9 best column headers as JSON:
 {{
   "top_headers": ["...", "...", "..."]
 }}
@@ -67,7 +76,7 @@ def api_top9():
 def home():
     return jsonify({"message": "Use /api/top9 to extract top headers from Figma UI."})
 
-# ---------- Start the app ----------
+# ---------- Run App ----------
 if __name__ == "__main__":
-    print("Running Ollama-driven Figma header extractor...")
+    print("Running Ollama-powered header extractor...")
     app.run(debug=True)

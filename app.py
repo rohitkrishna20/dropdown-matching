@@ -8,7 +8,7 @@ app = Flask(__name__)
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-# Extract all visible UI text from the Figma JSON
+# Extract text from Figma
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -25,49 +25,43 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             walk(child)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # de-duplicate, preserve order
+    return list(dict.fromkeys(out))  # remove duplicates, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
-# Construct prompt for Ollama without hardcoding any specific headers
+# Construct prompt for Ollama
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are analyzing UI text extracted from a Figma sales dashboard.
+You are analyzing UI text from a Figma-based sales dashboard.
 
-This dashboard contains one main table with a row of column headers followed by many rows of data.
+This dashboard contains one main data table, with a row of column headers followed by many rows of values.
 
-🎯 Your task is to extract **exactly 10 unique column header labels** from the UI.
+🎯 Your task is to extract **exactly 10 unique column header labels** from the UI text.
 
-🧠 True column headers:
-- Usually appear **only once** at the top of a table
-- Are typically more descriptive or technical than row-level data
-- Label structured fields — not user statuses, navigation, or process steps
-- Are not UI actions, repeated tags, timestamps, or badges
-
-🔒 Rules:
-- ✅ Include only **labels used as column headers**
-- ❌ Skip entries that appear many times across the UI
-- ❌ Exclude short words, vague terms, and repeated row-level values
-- ❌ Avoid navigation tabs, section titles, button labels, or call-to-action text
+🔒 Strict Rules:
+- ✅ Include only labels used as **table column headers**
+- ❌ Exclude values that are used as row-level content, stages, contact methods, or actions
+- ❌ Skip overly generic or duplicated values
+- ❌ Do NOT include labels shorter than 3 characters
 
 🧪 Format:
-Return a **valid JSON object** with keys "header1" through "header10", like:
+Return a valid JSON object using keys `"header1"` through `"header10"`:
 {{
-  "header1": "_____",
-  "header2": "_____",
+  "header1": "Name",
+  "header2": "Account",
   ...
-  "header10": "_____"
+  "header10": "Expected Closure"
 }}
 
-No markdown, no explanation — just the JSON object.
+Return only valid JSON — no markdown, no commentary.
 
-UI Text
--------
+UI Text:
+--------
 {blob}
 """.strip()
 
-# API Endpoint
+# Endpoint for top 10 headers
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -77,8 +71,16 @@ def api_top10():
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
+        # Try to extract exact JSON format
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
+
+        # Fallback: get up to 10 plain quoted strings
+        if not headers:
+            headers = re.findall(r'"\s*([^"]{3,}?)\s*"', raw)
+
+        # Pad or trim to exactly 10
+        headers = headers[:10] + [""] * (10 - len(headers))
+        output = {f"header{i+1}": headers[i] for i in range(10)}
 
         return jsonify(output)
 
@@ -91,8 +93,8 @@ def api_top10():
 
 @app.get("/")
 def home():
-    return jsonify({"message": "GET /api/top10 to extract column headers"})
+    return jsonify({"message": "GET /api/top10 to extract column headers from Figma UI"})
 
 if __name__ == "__main__":
-    print("Running with generalized prompt to avoid hardcoded labels…")
+    print("Running with improved prompt, label formatting, and fallback parsing…")
     app.run(debug=True)

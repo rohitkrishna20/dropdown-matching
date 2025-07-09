@@ -45,6 +45,8 @@ These column headers represent structured fields (like customer name, status, sc
 🧠 Focus on identifying field names, not row values or UI labels.
 
 Strict Rules:
+- ✅ prefer structured metadata labels like "Created", etc. - especially if they precede timestampes or dates
+- ❌ Exclude value-like terms such as "E-Mail", "Web" - these are row-level values, not column headers
 - ✅ Include only descriptive field names used to label table columns
 - ❌ Exclude pipeline stages (like “Qualify”, “Negotiation”, “Discovery”)
 - ❌ Exclude status badges or alert values (like “Due to closure”, “At Risk”)

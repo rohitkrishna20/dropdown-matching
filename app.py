@@ -4,15 +4,11 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# 1. Load the left-hand Figma JSON
-# ─────────────────────────────────────────────
+# Load Figma JSON
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-# ─────────────────────────────────────────────
-# 2. Extract every visible TEXT label (skip numbers)
-# ─────────────────────────────────────────────
+# Extract visible UI text
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -29,68 +25,62 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             walk(child)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))      # de-dupe, preserve order
+    return list(dict.fromkeys(out))  # de-dupe and preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
-# ─────────────────────────────────────────────
-# 3. Prompt builder  (no hard-coded headers)
-# ─────────────────────────────────────────────
+# Prompt function
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-
     return f"""
-You are analyzing UI text extracted from a Figma-based sales dashboard.
+You are analyzing UI text from a Figma sales dashboard.
 
-The dashboard has **one data table**: a single row of column headers followed by many data rows.
+This dashboard contains one main table with a row of column headers followed by many data rows.
 
-🎯 Task: Return **exactly 10 unique column-header labels**.
+🎯 Your task is to extract **exactly 10 unique column header labels** from the UI.
 
-Rules
------
-- ✅ Only include text that would be a structured data field name (column header).
-- ❌ Exclude row values, statuses, timestamps, buttons, tabs, and section titles.
-- ❌ Skip navigation or action text such as “Sales Dashboard”, “Overview”, “Quotes”, “Orders”.
-- ❌ Skip row labels like Qualify, Negotiation, Discovery, Sales Visit, Due to closure, At Risk, Timestamp.
-- ❌ No duplicates or semantic near-duplicates (e.g. “Expected Closure” vs “Due to closure”; “Created” vs “Created on”).
-- ✅ Choose labels that are **short, singular, and appear only once** in the UI — like real headers.
+🔒 Strict Rules:
+- ✅ Include only field names used as **column headers**
+- ❌ Exclude row-level values like "Qualify", "Negotiation", "Discovery", "At Risk", etc.
+- ❌ Exclude stage names, contact methods (like “E-Mail”, “Phone”, “Web”), or pipeline phases
+- ❌ Do NOT include time values, user actions (e.g. "Create Quote"), or section headers (e.g. "Dashboard")
+- ❌ Skip single words that appear multiple times — headers are usually unique
+- ❌ Avoid labels shorter than 3 characters or overly generic words (e.g. "Web", "My", "Open")
 
-Output
-------
-Return a valid JSON list of **exactly 10 strings**, no markdown, no prose.  
-Example:  
-["Header 1", "Header 2", ..., "Header 10"]
+🧪 Format:
+- Return a JSON list with 10 items using the format: 
+  ["header1", "header2", "header3", ..., "header10"]
+- Must be valid JSON, no extra text, no markdown
 
-UI Text List
-------------
+Text from the UI:
+------------------
 {blob}
 """.strip()
 
-# ─────────────────────────────────────────────
-# 4. /api/top10 – robust extractor
-# ─────────────────────────────────────────────
+# API endpoint
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
 
     try:
-        resp = ollama.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # A) Try to capture a real JSON list first
-        m_json = re.search(r"\[\s*\".*?\"\s*(,\s*\".*?\"\s*){1,}\]", raw, re.DOTALL)
-        if m_json:
-            headers = json.loads(m_json.group(0))
+        # Try to extract JSON from response
+        match = re.search(r"\[\s*\".*?\"\s*(,\s*\".*?\"\s*){1,}\]", raw, re.DOTALL)
+        if match:
+            headers = json.loads(match.group(0))
         else:
-            # B) Fallback: grab quoted strings from numbered / bullet lists
-            headers = re.findall(r"\"([^\"]+)\"", raw)[:10]
+            # Fallback to numbered extraction
+            headers = re.findall(r'"([^"]+)"', raw)
+            headers = headers[:10]
 
-        # Guarantee exactly 10 slots
+        # Ensure exactly 10 items
         headers = headers[:10] + [""] * (10 - len(headers))
-        return jsonify({"top_10": headers})
+
+        # Return headers as labeled fields
+        return jsonify({f"header{i+1}": h for i, h in enumerate(headers)})
 
     except Exception as e:
         return jsonify({
@@ -99,12 +89,10 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ─────────────────────────────────────────────
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract column headers"})
 
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Running – prompt-only filtering with stronger header instructions …")
+    print("Running with advanced prompt rules…")
     app.run(debug=True)

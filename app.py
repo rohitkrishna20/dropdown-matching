@@ -96,7 +96,10 @@ def api_top10():
             else:
                 corrected.append(h)
 
-        output = {f"header{i+1}": corrected[i] if i < len(corrected) else "" for i in range(10)}
+        output = {}
+        for i in range(10):
+            key = f"header{i+1}"
+            output[key]=corrected[i] if i < len(corrected) else ""
 
         return jsonify(output)
 

@@ -58,6 +58,7 @@ Strict Rules:
 - ❌ Exclude action buttons, tabs, filters, or navigation
 - ❌ Do NOT include timestamps or date examples
 - ❌ Do NOT include repeated terms like “Opportunity”, “Activity”, “Quote”, “Lead”
+- ❌ No duplicates are allowed - completely reject it - ("sales", "Sales", "sales")
 - ❌ Avoid stage-related phrases, alerts, or row-level values
 - ❌ Exclude anything that looks like data content instead of a label
 - ❌ Do NOT include any values that appear inside cells or badges (e.g. “Web”, “Direct Mail”)

@@ -124,6 +124,24 @@ from pprint import pprint
 rhs_path = Path("data/DataRightHS.json")
 rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
 
+def filter_non_empty_fields(data: dict) -> dict:
+    filtered = {}
+    for key, val in data.items():
+        if isinstance(val, str) and val.strip():
+            filtered[key] = val
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, str) and item.strip():
+                    filtered[key] = val
+                    break
+                elif isinstance(item, list) and item:
+                    filtered[key] = val
+                    break
+                elif isinstance(item, dict) and any(item.values()):
+                    filtered[key] = val
+                    break
+    return filtered
+
 def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
     return f"""
 You are an AI assistant analyzing a data dictionary in JSON format. 

@@ -1,94 +1,92 @@
 from flask import Flask, jsonify
 from pathlib import Path
 import json, re, ollama
-from collections import Counter
 
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────
-# 1. Load Figma JSON once
+# 1. Load and parse the Figma JSON
 # ─────────────────────────────────────────────
-FIGMA_JSON = Path("data/FigmaLeftHS.json").read_text(encoding="utf-8")
-figma_data  = json.loads(FIGMA_JSON)
+lhs_path = Path("data/FigmaLeftHS.json")
+lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
 # ─────────────────────────────────────────────
-# 2. Crawl for visible text + frequencies
+# 2. Extract all text from visible UI elements
 # ─────────────────────────────────────────────
-def crawl_text(node: dict, collector: list[str]):
-    if node.get("type") == "TEXT":
-        txt = node.get("characters", "").strip()
-        if txt:
-            # drop pure numbers / money / % (very common in rows)
-            stripped = txt.replace(",", "").replace("$", "").replace("%", "")
-            if not stripped.replace(".", "").isdigit():
-                collector.append(txt)
-    for child in node.get("children", []):
-        crawl_text(child, collector)
+def extract_figma_text(figma_json: dict) -> list[str]:
+    out = []
 
-all_strings: list[str] = []
-crawl_text(figma_data, all_strings)
+    def is_numeric(t: str) -> bool:
+        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
+        return cleaned.replace(".", "").isdigit()
 
-freq = Counter(all_strings)
-appear_once = [s for s in all_strings if freq[s] == 1]          # singletons, in original order
+    def walk(node: dict):
+        if node.get("type") == "TEXT":
+            txt = node.get("characters", "").strip()
+            if txt and not is_numeric(txt):
+                out.append(txt)
+        for child in node.get("children", []):
+            walk(child)
+
+    walk(figma_json)
+    return list(dict.fromkeys(out))  # de-dupe while preserving order
+
+ui_text = extract_figma_text(lhs_data)
 
 # ─────────────────────────────────────────────
-# 3. Build the prompt
+# 3. Construct Ollama prompt
 # ─────────────────────────────────────────────
-def build_prompt(candidates: list[str]) -> str:
-    bullet_blob = "\n".join(f"- {t}" for t in candidates)
+def make_prompt(labels: list[str]) -> str:
+    blob = "\n".join(f"- {t}" for t in labels)
+
     return f"""
-You are looking at UI text extracted from a Figma sales‐dashboard design.
+You are analyzing UI text from a Figma-based dashboard with a large structured table.
 
-**Facts you can rely on**
-• The main data table has one horizontal row of column headers (10 labels).  
-• Each header string appears **exactly once** in the entire design file.  
-• Navigation tabs, section titles, status chips, and row values repeat elsewhere.  
-• Headers are concise (2–3 words max), start with a capital letter, and sit above numeric / date data.
+Your goal is to extract exactly **10 column header labels** used in this data table.
 
-**Your task**  
-Return a JSON object giving exactly 10 unique column-header labels chosen **only** from the list below.
- • No values that repeat in the list below.  
- • No near-duplicates or synonyms.  
- • Skip strings shorter than 3 chars or obviously generic (“Open”, “Value”, “Action”, …).
+✅ Only include labels used as headers for structured columns in the table.
 
-**Output – REQUIRED format (nothing else)**  
+🚫 Do NOT include:
+• Navigation text, filters, or tabs
+• Buttons like "Create Quote"
+• Generic short labels (e.g. “Open”, “My”, “Web”)
+• Stage/status labels (e.g. “Qualify”, “Negotiation”, “Discovery”, “Leads”, “Opportunities”, “Activities”)
+• Timestamps, numeric-only values, or duplicate/near-duplicate terms
+
+⭐ Focus on:
+• Labels that appear once
+• Appear aligned above multiple structured data rows
+• Usually 2–3 words long
+• Positioned across a horizontal row in the layout
+
+Return a valid JSON object in this format only:
 {{
-  "header1": "…",
-  "header2": "…",
-   ...
-  "header10": "…"
+  "header1": "...",
+  "header2": "...",
+  ...
+  "header10": "..."
 }}
 
-Candidate strings
------------------
-{bullet_blob}
+Text from the UI:
+------------------
+{blob}
 """.strip()
 
 # ─────────────────────────────────────────────
-# 4. /api/top10 endpoint
+# 4. API endpoint to fetch top 10 headers
 # ─────────────────────────────────────────────
 @app.get("/api/top10")
 def api_top10():
-    prompt = build_prompt(appear_once)
+    prompt = make_prompt(ui_text)
 
     try:
-        resp = ollama.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Find the first {...} block that contains "header1"
-        match = re.search(r"\{[^{}]*\"header1\"[^{}]*\}", raw, re.DOTALL)
-        if not match:
-            raise ValueError("No header JSON object found in model response.")
-
-        obj_text = match.group(0)
-        headers_obj = json.loads(obj_text)
-
-        # Ensure we always deliver 10 keys (fill blanks if the model under-shoots)
-        result = {f"header{i}": headers_obj.get(f"header{i}", "") for i in range(1, 11)}
-        return jsonify(result)
+        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
+        return jsonify(output)
 
     except Exception as e:
         return jsonify({
@@ -98,12 +96,15 @@ def api_top10():
         }), 500
 
 # ─────────────────────────────────────────────
-# 5. Dev sanity route
+# 5. Home route
 # ─────────────────────────────────────────────
 @app.get("/")
-def root():
-    return jsonify({"note": "GET /api/top10 to fetch table headers extracted by the LLM"})
+def home():
+    return jsonify({"message": "GET /api/top10 to extract column headers from Figma UI"})
 
+# ─────────────────────────────────────────────
+# 6. Run the app
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print("⇢ Running with freq-filtered candidate list…")
+    print("🔁 Running Flask app to extract headers using Ollama…")
     app.run(debug=True)

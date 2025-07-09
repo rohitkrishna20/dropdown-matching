@@ -61,8 +61,8 @@ Strict Rules:
 
 Example:
 {{
-  "header1": "Name",
-  "header2": "Account",
+  "header1": "___",
+  "header2": "___",
   "header3": "___",
   ...
   "header10": "Alerts"

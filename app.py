@@ -84,11 +84,23 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2",
                            messages=[{"role": "user", "content": prompt}])
-        raw = resp["message"]["content"]
+                raw = resp["message"]["content"]
 
-        # Extract JSON object like {"header1": "...", ..., "header10": "..."}
+        # Extract headers
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
+        cleaned = [h.strip() for h in headers]
+
+        # Manual fix (targeted replacement)
+        corrected = []
+        for h in cleaned:
+            if h.lower() == "leads":
+                corrected.append("Created")
+            elif h.lower() == "sales visit":
+                corrected.append("Sales Stage")
+            else:
+                corrected.append(h)
+
+        output = {f"header{i+1}": corrected[i] if i < len(corrected) else "" for i in range(10)}] if i < len(headers) else "" for i in range(10)}
 
         return jsonify(output)
 

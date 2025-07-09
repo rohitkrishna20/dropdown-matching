@@ -116,10 +116,73 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
+# ─────────────────────────────────────────────────────
+# Additional endpoint: Match fields to headers
+# ─────────────────────────────────────────────────────
+from pprint import pprint
+
+rhs_path = Path("data/DataRightHS.json")
+rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
+
+def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
+    return f"""
+You are an AI assistant analyzing a data dictionary in JSON format. 
+
+Your task: For each of the following UI column headers, find the **three most relevant matching fields** from the data JSON. A "match" means the field name and its value are semantically related to the column header.
+
+For each match, return:
+- The `field` name
+- A representative `value` from that field
+
+Strict formatting:
+Return a valid JSON object like this:
+{{
+  "HeaderName1": [
+    {{ "field": "ActualFieldName1", "value": "Sample Value 1" }},
+    {{ "field": "ActualFieldName2", "value": "Sample Value 2" }},
+    {{ "field": "ActualFieldName3", "value": "Sample Value 3" }}
+  ],
+  ...
+}}
+
+Headers:
+{json.dumps(headers, indent=2)}
+
+Data JSON:
+{json.dumps(rhs_json, indent=2)[:4000]}  # (truncated to fit prompt length)
+""".strip()
+
+
+@app.post("/api/match_fields")
+def api_match_fields():
+    try:
+        top10_resp = api_top10().json
+        headers = list(top10_resp.values())
+
+        prompt = make_match_prompt(headers, rhs_data)
+
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
+        raw = resp["message"]["content"]
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
+            parsed = {k: re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
+                      for k, v in matches}
+
+        return jsonify(parsed)
+
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to match fields",
+            "details": str(e)
+        }), 500
+
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
-
 
 if __name__ == "__main__":
     print("Running with enhanced pattern-based prompt for column header extraction...")

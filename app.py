@@ -50,13 +50,14 @@ These column headers represent structured fields (like customer name, status, sc
 
 Strict Rules:
 - ✅ Include only descriptive field names used to label table columns
-- ❌ Exclude pipeline statuses (like “Qualify”, “Negotiation”, “Discovery”)
+- ❌ Exclude pipeline stages (like “Qualify”, “Negotiation”, “Discovery”)
+- ❌ Exclude status badges or alert values (like “Due to closure”, “At Risk”)
 - ❌ Exclude action buttons, tabs, filters, or navigation
-- ❌ Do NOT include timestamps or date formats
-- ❌ Do NOT include repeated single terms like “Opportunity”, “Activity”, “Quote”, “Lead”
-- ❌ Avoid stage-related text, metadata, or statuses
-- ❌ Avoid anything that appears more than once unless it's clearly a header
-- ❌ Do not include words that are generic like “Open”, “Primary”, or “Web”
+- ❌ Do NOT include timestamps or date examples
+- ❌ Do NOT include repeated terms like “Opportunity”, “Activity”, “Quote”, “Lead”
+- ❌ Avoid stage-related phrases, alerts, or row-level values
+- ❌ Exclude anything that looks like data content instead of a label
+- ❌ Do NOT include any values that appear inside cells or badges (e.g. “Web”, “Direct Mail”)
 
 🎯 Return ONLY a JSON object with keys "header1" through "header10"
 

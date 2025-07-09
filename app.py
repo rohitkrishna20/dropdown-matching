@@ -147,7 +147,8 @@ def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
 You are an AI assistant analyzing a data dictionary in JSON format. 
 
 Your task: For each of the following UI column headers, find the **three most relevant matching fields** from the data JSON. A "match" means the field name and its value are semantically related to the column header.
-
+- each header MUST have three outputs, whichever you believe are the three closest matches based on the data
+- find the headers and find the data that have the most related responses
 For each match, return:
 - The `field` name
 - A representative `value` from that field

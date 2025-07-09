@@ -1,16 +1,14 @@
 from flask import Flask, jsonify
 from pathlib import Path
-import json
-import re
-import ollama
+import json, re, ollama
 
 app = Flask(__name__)
 
-# Load Figma JSON data
+# Load Figma JSON
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-# Extract visible text from Figma
+# Extract all visible UI text from the Figma JSON
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -27,67 +25,59 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             walk(child)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # remove duplicates but preserve order
+    return list(dict.fromkeys(out))  # de-duplicate, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
-# Build the prompt for Ollama
+# Construct prompt for Ollama without hardcoding any specific headers
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are analyzing UI text from a Figma sales dashboard.
+You are analyzing UI text extracted from a Figma sales dashboard.
 
-This dashboard contains one main table with a row of column headers followed by many data rows.
+This dashboard contains one main table with a row of column headers followed by many rows of data.
 
 🎯 Your task is to extract **exactly 10 unique column header labels** from the UI.
 
-🔒 Strict Rules:
-- ✅ Include only field names used as **column headers**
-- ❌ Exclude anything that looks like a data value or contact method (e.g. emails, stages, statuses, links)
-- ❌ Skip short repeated values or vague/overly generic UI labels
-- ❌ Ignore navigation labels, dashboard section headers, timestamps, or actions
-- ❌ Avoid short one-word entries that could be part of dropdowns or badges
+🧠 True column headers:
+- Usually appear **only once** at the top of a table
+- Are typically more descriptive or technical than row-level data
+- Label structured fields — not user statuses, navigation, or process steps
+- Are not UI actions, repeated tags, timestamps, or badges
+
+🔒 Rules:
+- ✅ Include only **labels used as column headers**
+- ❌ Skip entries that appear many times across the UI
+- ❌ Exclude short words, vague terms, and repeated row-level values
+- ❌ Avoid navigation tabs, section titles, button labels, or call-to-action text
 
 🧪 Format:
-Return a **JSON object** with keys "header1" through "header10", like this:
+Return a **valid JSON object** with keys "header1" through "header10", like:
 {{
-  "header1": "Name",
-  "header2": "Account",
+  "header1": "_____",
+  "header2": "_____",
   ...
-  "header10": "Expected Closure"
+  "header10": "_____"
 }}
 
-No markdown, no commentary. Just return valid JSON.
+No markdown, no explanation — just the JSON object.
 
 UI Text
 -------
 {blob}
 """.strip()
 
-# API route to get top 10 headers
+# API Endpoint
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
 
     try:
-        resp = ollama.chat(
-            model="llama3.2",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Try structured JSON object format: "header1": "Name"
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-
-        # Fallback: numbered list format: 1. "Name"
-        if not headers:
-            headers = re.findall(r'\d+\.\s*"([^"]+)"', raw)
-
-        # Fallback: generic JSON list: ["Name", "Account", ...]
-        if not headers:
-            headers = re.findall(r'"([^"]+)"', raw)
-
-        headers = headers[:10]
         output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
 
         return jsonify(output)
@@ -99,12 +89,10 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# Home route
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract column headers"})
 
-# Run the app
 if __name__ == "__main__":
-    print("Running with labeled header output and prompt fallback handling...")
+    print("Running with generalized prompt to avoid hardcoded labels…")
     app.run(debug=True)

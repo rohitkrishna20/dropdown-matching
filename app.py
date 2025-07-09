@@ -32,12 +32,12 @@ def extract_figma_text(figma_json: dict):
             _walk(child)
 
     _walk(figma_json)
-    return list(dict.fromkeys(labels))
+    return list(dict.fromkeys(labels))  # keep unique order
 
 ui_text = extract_figma_text(lhs_data)
 
 # ─────────────────────────────────────────────
-# 3. Prompt for top headers
+# 3. Prompt for top headers (refined prompt)
 # ─────────────────────────────────────────────
 def make_prompt_top10(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
@@ -45,19 +45,20 @@ def make_prompt_top10(labels: list[str]) -> str:
     return f"""
 You are analyzing UI text extracted from a Figma-based table UI design.
 
-Your task is to identify the **10 most likely column headers** shown in this table design.
+Your task is to identify the **10 most likely column headers** shown in this table.
 
 Only include values that are actual **field labels** for structured data columns (e.g. Name, Account, Total Value, AI Score, etc).
 
 Do not include:
 - Row values like "Qualify", "Negotiation", "Negotation", or "Discovery"
-- Any labels like “Sales Visit”, “Direct Mail”, “Timestamp”
+- Labels such as “Sales Visit”, “Direct Mail”, “Timestamp”
 - Section titles such as "Sales Dashboard" or "Overview"
-- Tabs, filters, or navigational UI labels
+- Tabs, filters, or navigational UI elements
 - Numeric-only values or date-like values
+- Duplicate or semantically overlapping column labels (e.g. avoid including both "Expected Closure" and "Due to closure")
 
-Return ONLY a plain JSON list of exactly 10 strings in this format:
-["Name", "Account", "AI Score", "Total Value", "Expected Closure", ...]
+Return ONLY a valid JSON list of **10 unique column headers**, like:
+["___", "___", "___", "Total", "Expected Closure", ...]
 
 UI Text:
 --------
@@ -78,13 +79,13 @@ def api_top10():
         )
         raw = response["message"]["content"]
 
-        # Extract the first valid JSON array from the response
-        match = re.search(r"\[\s*\".*?\"\s*(,\s*\".*?\"\s*){0,9}\]", raw, re.DOTALL)
+        # Extract JSON list from response using regex
+        match = re.search(r"\[\s*\".*?\"\s*(,\s*\".*?\"\s*){1,}\]", raw, re.DOTALL)
         if not match:
-            raise ValueError("Could not extract a 10-item list from Ollama response.")
+            raise ValueError("Could not extract a valid JSON list from Ollama response.")
 
-        headers = json.loads(match.group(0))  # plain list[str]
-        return jsonify({"top_10": headers})
+        header_list = json.loads(match.group(0))
+        return jsonify({"top_10": header_list})
 
     except Exception as e:
         return jsonify({
@@ -104,5 +105,5 @@ def home():
 # 6. Run the app
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Running (prompt-only filtering)…")
+    print("Running with enhanced prompt filtering duplicates and junk…")
     app.run(debug=True)

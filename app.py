@@ -144,33 +144,44 @@ def filter_non_empty_fields(data: dict) -> dict:
 
 def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
     return f"""
-You are an AI assistant analyzing a data dictionary in JSON format. 
+You are a helpful assistant performing **semantic field matching** between UI column headers and a structured JSON dataset.
 
-Your task: For each of the following UI column headers, find the **three most relevant matching fields** from the data JSON. A "match" means the field name and its value are semantically related to the column header.
-- each header MUST have three outputs, whichever you believe are the three closest matches based on the data
-- find the headers and find the data that have the most related responses
-For each match, return:
-- The `field` name
-- A representative `value` from that field
+Your task:
+For each UI column header, return the **three most semantically relevant field–value pairs** from the JSON data.
+
+🧠 Definitions:
+- A "match" is when a JSON field's name and sample value closely relate to the meaning of the header.
+- Do NOT rely on string similarity alone — use **semantic/contextual** understanding.
+- Avoid repeating the same JSON key for multiple matches unless unavoidable.
+- If a field has no valid values (empty list or meaningless data), skip it.
 
 Strict formatting:
 Return a valid JSON object like this:
 {{
-  "HeaderName1": [
-    {{ "field": "ActualFieldName1", "value": "Sample Value 1" }},
-    {{ "field": "ActualFieldName2", "value": "Sample Value 2" }},
-    {{ "field": "ActualFieldName3", "value": "Sample Value 3" }}
+  "Header1": [
+    {{ "field": "MatchingFieldName1", "value": "SampleValue1" }},
+    {{ "field": "MatchingFieldName2", "value": "SampleValue2" }},
+    {{ "field": "MatchingFieldName3", "value": "SampleValue3" }}
+  ],
+  "Header2": [
+    ...
   ],
   ...
 }}
+
+✅ Rules:
+- Always return **exactly 3** matches per header.
+- Do NOT leave any header empty.
+- Only include matches that are clearly related in meaning.
+- Never output empty string or blank values.
+- Use the most representative sample value for each field.
 
 Headers:
 {json.dumps(headers, indent=2)}
 
 Data JSON:
-{json.dumps(rhs_json, indent=2)[:4000]}  # (truncated to fit prompt length)
+{json.dumps(rhs_json, indent=2)[:4000]}  # truncated
 """.strip()
-
 
 @app.post("/api/match_fields")
 def api_match_fields():

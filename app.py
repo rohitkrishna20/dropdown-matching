@@ -53,6 +53,8 @@ Strict Rules:
 - ✅ Include only descriptive field names used to label table columns
 - ❌ Exclude pipeline stages (like “Qualify”, “Negotiation”, “Discovery”)
 - ❌ Exclude status badges or alert values (like “Due to closure”, “At Risk”)
+- ❌ Exclude anything that sounds like a text style, label category, or design artifact
+- ❌ If a phrase includes "metadata" - reject it
 - ❌ Exclude action buttons, tabs, filters, or navigation
 - ❌ Do NOT include timestamps or date examples
 - ❌ Do NOT include repeated terms like “Opportunity”, “Activity”, “Quote”, “Lead”

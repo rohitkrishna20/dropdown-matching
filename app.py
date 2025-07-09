@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 from pathlib import Path
 import json
 import ollama
+import re
 
 app = Flask(__name__)
 
@@ -13,7 +14,7 @@ with LHS_PATH.open(encoding="utf-8") as f:
     lhs_data = json.load(f)
 
 # ────────────────────────────────────────────────────────────────
-# 2. Extract visible text from Figma (skip numeric-only)
+# 2. Extract visible UI text (skip numeric-only)
 # ────────────────────────────────────────────────────────────────
 def extract_figma_text(figma_json: dict) -> list[str]:
     labels = []
@@ -36,7 +37,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 ui_text = extract_figma_text(lhs_data)
 
 # ────────────────────────────────────────────────────────────────
-# 3. Create prompt for top 10 header extraction
+# 3. Prompt builder (ban 'timestamp' and markdown output)
 # ────────────────────────────────────────────────────────────────
 def make_prompt_top10(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
@@ -56,6 +57,7 @@ The design includes a structured data table with labeled columns.
    - “Discovery”
    - “Sales Visit”
    - “Direct Mail”
+   - “Timestamp”
 
 ❌ Also ignore:
    - Section titles (e.g. “Sales Dashboard”, “Overview”)
@@ -63,31 +65,37 @@ The design includes a structured data table with labeled columns.
    - Navigation tabs
    - Numeric-only items
 
-UI Text Extracted:
-------------------
-{blob}
-
-Return only this JSON object:
+Return only this raw JSON object — without markdown or explanation:
 {{
   "top_headers": ["Header1", "Header2", ..., "Header10"]
 }}
+
+UI Text Extracted:
+------------------
+{blob}
 """.strip()
 
 # ────────────────────────────────────────────────────────────────
-# 4. /api/top10 route
+# 4. Route: /api/top10
 # ────────────────────────────────────────────────────────────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt_top10(ui_text)
+
     try:
         response = ollama.chat(
             model="llama3.2",
             messages=[{"role": "user", "content": prompt}]
         )
-        result = json.loads(response["message"]["content"])["top_headers"]
-        return jsonify({
-            "top_10": result
-        })
+        raw = response["message"]["content"]
+
+        # Remove markdown block like ```json ... ```
+        cleaned = re.sub(r"```.*?```", "", raw, flags=re.DOTALL).strip()
+
+        # Parse the JSON and extract
+        parsed = json.loads(cleaned)
+        return jsonify({"top_10": parsed["top_headers"]})
+
     except Exception as e:
         return jsonify({
             "error": "Failed to parse Ollama response",
@@ -95,14 +103,14 @@ def api_top10():
             "raw_response": response["message"]["content"]
         }), 500
 
-# Optional root route
+# Optional root
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract column headers from Figma UI"})
 
 # ────────────────────────────────────────────────────────────────
-# 5. Run App
+# 5. Run app
 # ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Running header extractor (clean JSON, filtered rows)...")
+    print("Running header extractor with strict filters + clean JSON...")
     app.run(debug=True)

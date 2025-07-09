@@ -63,7 +63,7 @@ Example:
   "header2": "Account",
   "header3": "___",
   ...
-  "header10": "___"
+  "header10": "Alerts"
 }}
 
 Raw UI Text:

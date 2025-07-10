@@ -45,8 +45,8 @@ These column headers represent structured fields (like customer name, status, sc
 🧠 Focus on identifying field names, not row values or UI labels.
 
 Strict Rules:
-- ✅ prefer structured field labels that represent system-generated metadata, like warnings, risk scores, AI insights, or automated notices
-- Include labels associated with status indicators, alerts, flags, ai classifications, or summary conditions - especially if they appear at the edge or top of a card or row. 
+- ✅ prefer structured field labels that represent system-generated metadata, like warnings
+- Include labels associated with status indicators - especially if they appear at the edge or top of a card or row. 
 - ✅ favor labels grouped with known column headers 
 - ✅ include unique, structured field labels that appear at the end of table rows or near other headers
 - ✅ select labels that appear once or appear early in the visual order as they are likely table header rows

@@ -49,6 +49,7 @@ Strict Rules:
 - ✅ favor labels grouped with known column headers 
 - ✅ include unique, structured field labels that appear at the end of table rows or near other headers
 - ✅ select labels that appear once or appear early in the visual order as they are likely table header rows
+- Do include high-level field labels if they appear alone, early, or near table rows, treat them as structured metadata
 - ❌ Exclude value-like terms such as "E-Mail", "Web" - these are row-level values, not column headers
 - ✅ Include only descriptive field names used to label table columns
 - ❌ Exclude pipeline stages (like “Qualify”, “Negotiation”, “Discovery”)

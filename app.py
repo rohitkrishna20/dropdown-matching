@@ -68,6 +68,8 @@ Strict Rules:
 - ❌ Exclude entries with names, company references, connectivity types, or network technologies (e.g. “MPLS”, “SAT”, “Connectivity”)
 - ❌ Exclude any item containing multiple segments separated by dashes (e.g. "A - B - C") — these are likely data entries, not headers
 - ❌ If a phrase contains words like “Group”, “Edge”, “Consulting”, “Solutions”, “Health”, “Global”, or “Services”, exclude it — these are likely business names or customers
+- ❌ Exclude terms like “Status”, “Creation Date”, “Date”, or “Time” — these are often metadata rows or timestamps, not true column headers
+- ❌ Exclude generic labels like “Value”, “Info”, “Details”, or “Stage” unless part of a specific known column label
 
 🎯 Return ONLY a JSON object with keys "header1" through "header10"
 

@@ -1,14 +1,21 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from pathlib import Path
 import json, re, ollama
 
+from typing import List
+
 app = Flask(__name__)
 
-
+# ──────────────── Load static JSON data ────────────────
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-def extract_figma_text(figma_json: dict) -> list[str]:
+rhs_path = Path("data/DataRightHS.json")
+rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
+
+
+# ──────────────── Helpers ────────────────
+def extract_figma_text(figma_json: dict) -> List[str]:
     out = []
 
     def is_numeric(t: str) -> bool:
@@ -30,10 +37,11 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     walk(figma_json)
     return list(dict.fromkeys(out))  # de-dupe, preserve order
 
+
 ui_text = extract_figma_text(lhs_data)
 
 
-def make_prompt(labels: list[str]) -> str:
+def make_prompt(labels: List[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
 You are identifying column headers from raw Figma UI text extracted from a sales dashboard table.
@@ -65,49 +73,6 @@ Extracted UI Text:
 {blob}
 """.strip()
 
-@app.get("/api/top10")
-def api_top10():
-    prompt = make_prompt(ui_text)
-
-    try:
-        resp = ollama.chat(model="llama3.2",
-                           messages=[{"role": "user", "content": prompt}])
-        raw = resp["message"]["content"]
-
-       
-        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        cleaned = [h.strip() for h in headers]
-
-        corrected = []
-        for h in cleaned:
-            if h.lower() == "leads":
-                corrected.append("Created")
-            elif h.lower() == "sales visit":
-                corrected.append("Sales Stage")
-            else:
-                corrected.append(h)
-
-        output = {}
-        for i in range(10):
-            key = f"header{i+1}"
-            output[key]=corrected[i] if i < len(corrected) else ""
-
-        return jsonify(output)
-
-    except Exception as e:
-        return jsonify({
-            "error": "Failed to parse Ollama response",
-            "details": str(e),
-            "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
-        }), 500
-
-# ─────────────────────────────────────────────────────
-# Additional endpoint: Match fields to headers
-# ─────────────────────────────────────────────────────
-from pprint import pprint
-
-rhs_path = Path("data/DataRightHS.json")
-rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
 
 def filter_non_empty_fields(data: dict) -> dict:
     filtered = {}
@@ -127,7 +92,8 @@ def filter_non_empty_fields(data: dict) -> dict:
                     break
     return filtered
 
-def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
+
+def make_match_prompt(headers: List[str], rhs_json: dict) -> str:
     return f"""
 You are an AI assistant matching column headers from a UI to field-value pairs from a JSON data dictionary.
 
@@ -168,24 +134,68 @@ Data JSON (cleaned and partial):
 {json.dumps(rhs_json, indent=2)[:3500]}
 """.strip()
 
+
+# ──────────────── API Routes ────────────────
+@app.get("/api/top10")
+def api_top10():
+    prompt = make_prompt(ui_text)
+    try:
+        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
+        if not resp or "message" not in resp or "content" not in resp["message"]:
+            raise ValueError("Missing content in Ollama response")
+
+        raw = resp["message"]["content"]
+
+        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+        cleaned = [h.strip() for h in headers]
+
+        corrected = []
+        for h in cleaned:
+            if h.lower() == "leads":
+                corrected.append("Created")
+            elif h.lower() == "sales visit":
+                corrected.append("Sales Stage")
+            else:
+                corrected.append(h)
+
+        output = {}
+        for i in range(10):
+            key = f"header{i+1}"
+            output[key] = corrected[i] if i < len(corrected) else ""
+
+        return jsonify(output)
+
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to parse Ollama response",
+            "details": str(e),
+            "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
+        }), 500
+
+
 @app.post("/api/match_fields")
 def api_match_fields():
     try:
-        top10_resp = api_top10().json
-        headers = list(top10_resp.values())
+        # Get headers via internal function call and parse the response correctly
+        with app.test_client() as client:
+            top10_response = client.get("/api/top10")
+            headers_json = json.loads(top10_response.get_data(as_text=True))
+            headers = list(headers_json.values())
 
-        prompt = make_match_prompt(headers, rhs_data)
+        cleaned_rhs = filter_non_empty_fields(rhs_data)
+        prompt = make_match_prompt(headers, cleaned_rhs)
 
-        resp = ollama.chat(model="llama3.2",
-                           messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
         try:
             parsed = json.loads(raw)
         except Exception:
             matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            parsed = {k: re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
-                      for k, v in matches}
+            parsed = {
+                k: [{"field": f, "value": v} for f, v in re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)]
+                for k, v in matches
+            }
 
         return jsonify(parsed)
 
@@ -195,10 +205,13 @@ def api_match_fields():
             "details": str(e)
         }), 500
 
+
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 
+
+# ──────────────── App Entrypoint ────────────────
 if __name__ == "__main__":
     print("Running with enhanced pattern-based prompt for column header extraction...")
     app.run(debug=True)

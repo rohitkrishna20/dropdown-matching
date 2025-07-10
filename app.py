@@ -1,4 +1,38 @@
-@ -36,65 +36,35 @@ ui_text = extract_figma_text(lhs_data)
+from flask import Flask, request, jsonify
+from pathlib import Path
+import json, re, ollama
+
+app = Flask(__name__)
+
+
+lhs_path = Path("data/FigmaLeftHS.json")
+lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
+
+def extract_figma_text(figma_json: dict) -> list[str]:
+    out = []
+
+    def is_numeric(t: str) -> bool:
+        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
+        return cleaned.replace(".", "").isdigit()
+
+    def walk(node: dict):
+        if isinstance(node, dict):
+            if node.get("type") == "TEXT":
+                txt = node.get("characters", "").strip()
+                if txt and not is_numeric(txt):
+                    out.append(txt)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(figma_json)
+    return list(dict.fromkeys(out))  # de-dupe, preserve order
+
+ui_text = extract_figma_text(lhs_data)
+
+
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""

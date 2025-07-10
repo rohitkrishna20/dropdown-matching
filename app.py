@@ -1,21 +1,14 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from pathlib import Path
 import json, re, ollama
 
-from typing import List
-
 app = Flask(__name__)
 
-# ──────────────── Load static JSON data ────────────────
+
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
-rhs_path = Path("data/DataRightHS.json")
-rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
-
-
-# ──────────────── Helpers ────────────────
-def extract_figma_text(figma_json: dict) -> List[str]:
+def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
     def is_numeric(t: str) -> bool:
@@ -37,16 +30,22 @@ def extract_figma_text(figma_json: dict) -> List[str]:
     walk(figma_json)
     return list(dict.fromkeys(out))  # de-dupe, preserve order
 
-
 ui_text = extract_figma_text(lhs_data)
 
 
-def make_prompt(labels: List[str]) -> str:
+def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are identifying column headers from raw Figma UI text extracted from a sales dashboard table.
+You are analyzing raw UI text extracted from a sales dashboard built in Figma.
 
-🧠 Your task:
+The dashboard includes a main data table, and your job is to identify the 10 most likely **column headers** in that table.
+
+These column headers represent structured fields (like customer name, status, score, dates, etc.) and are used to label columns in the top row of a table.
+
+🧠 Focus on identifying field names, not row values or UI labels.
+
+Strict Rules:
+- ✅ prefer structured field labels that represent system-generated metadata, like warnings
 Strict Rules:
 - ✅ Only include structured metadata field names that are likely used as column headers
 - ✅ Include only one unique field per row — no duplicates (if "Sales Stage" appears twice, include it only once)
@@ -80,19 +79,66 @@ Strict Rules:
 - ❌ Exclude terms like “Status”, “Creation Date”, “Date”, or “Time” — these are often metadata rows or timestamps, not true column headers
 - ❌ Exclude generic labels like “Value”, “Info”, “Details”, or “Stage” unless part of a specific known column label - do not include any header that contains status
 
-📦 Output format:
-Return only a JSON object:
+🎯 Return ONLY a JSON object with keys "header1" through "header10"
+
+Example:
 {{
   "header1": "___",
   "header2": "___",
+  "header3": "___",
   ...
   "header10": "___"
 }}
 
-Extracted UI Text:
+Raw UI Text:
+------------
 {blob}
 """.strip()
 
+
+@app.get("/api/top10")
+def api_top10():
+    prompt = make_prompt(ui_text)
+
+    try:
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
+        raw = resp["message"]["content"]
+
+
+        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+        cleaned = [h.strip() for h in headers]
+
+        corrected = []
+        for h in cleaned:
+            if h.lower() == "leads":
+                corrected.append("Created")
+            elif h.lower() == "sales visit":
+                corrected.append("Sales Stage")
+            else:
+                corrected.append(h)
+
+        output = {}
+        for i in range(10):
+            key = f"header{i+1}"
+            output[key]=corrected[i] if i < len(corrected) else ""
+
+        return jsonify(output)
+
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to parse Ollama response",
+            "details": str(e),
+            "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
+        }), 500
+
+# ─────────────────────────────────────────────────────
+# Additional endpoint: Match fields to headers
+# ─────────────────────────────────────────────────────
+from pprint import pprint
+
+rhs_path = Path("data/DataRightHS.json")
+rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
 
 def filter_non_empty_fields(data: dict) -> dict:
     filtered = {}
@@ -112,110 +158,65 @@ def filter_non_empty_fields(data: dict) -> dict:
                     break
     return filtered
 
-
-def make_match_prompt(headers: List[str], rhs_json: dict) -> str:
+def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
     return f"""
-You are an AI assistant matching column headers from a UI to field-value pairs from a JSON data dictionary.
+You are a helpful assistant performing **semantic field matching** between UI column headers and a structured JSON dataset.
 
-Your goal: For each header, select the **three most semantically related fields** from the JSON, using BOTH the field name and a meaningful sample value.
+Your task:
+For each UI column header, return the **three most semantically relevant field–value pairs** from the JSON data.
 
-🧠 Match rules:
-- Do NOT rely on string overlap alone — match based on meaning, context, and intent.
-- Fields with empty values should be skipped, but always find 3 of the best available.
-- You must still return 3 results even if the match is imperfect — prioritize **closeness of meaning**.
-- Avoid exact duplicate field names unless they provide different values.
-- If a header is vague or broad, choose the **most likely candidates** that relate to it in a business/sales context.
+🧠 Definitions:
+- A "match" is when a JSON field's name and sample value closely relate to the meaning of the header.
+- Do NOT rely on string similarity alone — use **semantic/contextual** understanding.
+- Avoid repeating the same JSON key for multiple matches unless unavoidable.
+- If a field has no valid values (empty list or meaningless data), skip it.
 
-🚫 Never return:
-- Empty lists
-- Empty strings
-- Placeholder values (e.g. "N/A", "null", or "Metadata")
-- Repeat fields with the same sample value
-
-✅ Always:
-- Return exactly 3 distinct field–value objects per header
-- Include a representative value for each
-- Pick the most meaningful and populated data fields, not just string matches
-
-Output format (strict JSON):
+Strict formatting:
+Return a valid JSON object like this:
 {{
   "Header1": [
-    {{ "field": "FieldName1", "value": "Example value 1" }},
-    {{ "field": "FieldName2", "value": "Example value 2" }},
-    {{ "field": "FieldName3", "value": "Example value 3" }}
+    {{ "field": "MatchingFieldName1", "value": "SampleValue1" }},
+    {{ "field": "MatchingFieldName2", "value": "SampleValue2" }},
+    {{ "field": "MatchingFieldName3", "value": "SampleValue3" }}
+  ],
+  "Header2": [
+    ...
   ],
   ...
 }}
 
+✅ Rules:
+- Always return **exactly 3** matches per header.
+- Do NOT leave any header empty.
+- Only include matches that are clearly related in meaning.
+- Never output empty string or blank values.
+- Use the most representative sample value for each field.
+
 Headers:
 {json.dumps(headers, indent=2)}
 
-Data JSON (cleaned and partial):
-{json.dumps(rhs_json, indent=2)[:3500]}
+Data JSON:
+{json.dumps(rhs_json, indent=2)[:4000]}  # truncated
 """.strip()
-
-
-# ──────────────── API Routes ────────────────
-@app.get("/api/top10")
-def api_top10():
-    prompt = make_prompt(ui_text)
-    try:
-        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        if not resp or "message" not in resp or "content" not in resp["message"]:
-            raise ValueError("Missing content in Ollama response")
-
-        raw = resp["message"]["content"]
-
-        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        cleaned = [h.strip() for h in headers]
-
-        corrected = []
-        for h in cleaned:
-            if h.lower() == "leads":
-                corrected.append("Created")
-            elif h.lower() == "sales visit":
-                corrected.append("Sales Stage")
-            else:
-                corrected.append(h)
-
-        output = {}
-        for i in range(10):
-            key = f"header{i+1}"
-            output[key] = corrected[i] if i < len(corrected) else ""
-
-        return jsonify(output)
-
-    except Exception as e:
-        return jsonify({
-            "error": "Failed to parse Ollama response",
-            "details": str(e),
-            "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
-        }), 500
-
 
 @app.post("/api/match_fields")
 def api_match_fields():
     try:
-        # Get headers via internal function call and parse the response correctly
-        with app.test_client() as client:
-            top10_response = client.get("/api/top10")
-            headers_json = json.loads(top10_response.get_data(as_text=True))
-            headers = list(headers_json.values())
+        top10_resp = api_top10().json
+        headers = list(top10_resp.values())
 
-        cleaned_rhs = filter_non_empty_fields(rhs_data)
-        prompt = make_match_prompt(headers, cleaned_rhs)
+        prompt = make_match_prompt(headers, rhs_data)
 
-        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(model="llama3.2",
+                           messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
         try:
             parsed = json.loads(raw)
         except Exception:
             matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            parsed = {
-                k: [{"field": f, "value": v} for f, v in re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)]
-                for k, v in matches
-            }
+            parsed = {k: re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
+                      for k, v in matches}
 
         return jsonify(parsed)
 
@@ -225,13 +226,10 @@ def api_match_fields():
             "details": str(e)
         }), 500
 
-
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 
-
-# ──────────────── App Entrypoint ────────────────
 if __name__ == "__main__":
     print("Running with enhanced pattern-based prompt for column header extraction...")
     app.run(debug=True)

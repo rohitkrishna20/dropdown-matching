@@ -4,7 +4,6 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
@@ -31,7 +30,6 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     return list(dict.fromkeys(out))  # de-dupe, preserve order
 
 ui_text = extract_figma_text(lhs_data)
-
 
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
@@ -74,7 +72,6 @@ def api_top10():
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-       
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
         cleaned = [h.strip() for h in headers]
 
@@ -90,7 +87,7 @@ def api_top10():
         output = {}
         for i in range(10):
             key = f"header{i+1}"
-            output[key]=corrected[i] if i < len(corrected) else ""
+            output[key] = corrected[i] if i < len(corrected) else ""
 
         return jsonify(output)
 
@@ -104,8 +101,6 @@ def api_top10():
 # ─────────────────────────────────────────────────────
 # Additional endpoint: Match fields to headers
 # ─────────────────────────────────────────────────────
-from pprint import pprint
-
 rhs_path = Path("data/DataRightHS.json")
 rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
 
@@ -129,34 +124,29 @@ def filter_non_empty_fields(data: dict) -> dict:
 
 def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
     return f"""
-You are an AI assistant matching column headers from a UI to field-value pairs from a JSON data dictionary.
+You are an AI assistant matching column headers from a UI to field–value pairs from a JSON data dictionary.
 
-Your goal: For each header, select the **three most semantically related fields** from the JSON, using BOTH the field name and a meaningful sample value.
+🎯 Task:
+For each UI column header, return **exactly 3 semantically related** field–value pairs from the data JSON.
 
-🧠 Match rules:
-- Do NOT rely on string overlap alone — match based on meaning, context, and intent.
-- Fields with empty values should be skipped, but always find 3 of the best available.
-- You must still return 3 results even if the match is imperfect — prioritize **closeness of meaning**.
-- Avoid exact duplicate field names unless they provide different values.
-- If a header is vague or broad, choose the **most likely candidates** that relate to it in a business/sales context.
+✅ Guidelines:
+- Use contextual/semantic meaning — not just string overlap.
+- Skip empty, null, or meaningless values (like "" or "N/A").
+- You must return 3 relevant matches per header, even if imperfect.
+- Do NOT reuse the same key unless unavoidable.
 
-🚫 Never return:
-- Empty lists
-- Empty strings
-- Placeholder values (e.g. "N/A", "null", or "Metadata")
-- Repeat fields with the same sample value
+🚫 Never include:
+- Empty lists or values
+- Repeated field names
+- Placeholder terms or generic keys
 
-✅ Always:
-- Return exactly 3 distinct field–value objects per header
-- Include a representative value for each
-- Pick the most meaningful and populated data fields, not just string matches
-
-Output format (strict JSON):
+📦 Output format:
+You must only use the headers provided — do not invent new keys. Return:
 {{
   "Header1": [
-    {{ "field": "FieldName1", "value": "Example value 1" }},
-    {{ "field": "FieldName2", "value": "Example value 2" }},
-    {{ "field": "FieldName3", "value": "Example value 3" }}
+    {{ "field": "FieldName1", "value": "Example 1" }},
+    {{ "field": "FieldName2", "value": "Example 2" }},
+    {{ "field": "FieldName3", "value": "Example 3" }}
   ],
   ...
 }}
@@ -164,7 +154,7 @@ Output format (strict JSON):
 Headers:
 {json.dumps(headers, indent=2)}
 
-Data JSON (cleaned and partial):
+Data:
 {json.dumps(rhs_json, indent=2)[:3500]}
 """.strip()
 
@@ -172,9 +162,10 @@ Data JSON (cleaned and partial):
 def api_match_fields():
     try:
         top10_resp = api_top10().json
-        headers = list(top10_resp.values())
+        headers = [v for k, v in top10_resp.items() if v]
 
-        prompt = make_match_prompt(headers, rhs_data)
+        cleaned_data = filter_non_empty_fields(rhs_data)
+        prompt = make_match_prompt(headers, cleaned_data)
 
         resp = ollama.chat(model="llama3.2",
                            messages=[{"role": "user", "content": prompt}])
@@ -187,7 +178,8 @@ def api_match_fields():
             parsed = {k: re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
                       for k, v in matches}
 
-        return jsonify(parsed)
+        result = {header: parsed.get(header, []) for header in headers}
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({

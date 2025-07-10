@@ -159,43 +159,43 @@ def filter_non_empty_fields(data: dict) -> dict:
 
 def make_match_prompt(headers: list[str], rhs_json: dict) -> str:
     return f"""
-You are a helpful assistant performing **semantic field matching** between UI column headers and a structured JSON dataset.
+You are an AI assistant matching column headers from a UI to field-value pairs from a JSON data dictionary.
 
-Your task:
-For each UI column header, return the **three most semantically relevant field–value pairs** from the JSON data.
+Your goal: For each header, select the **three most semantically related fields** from the JSON, using BOTH the field name and a meaningful sample value.
 
-🧠 Definitions:
-- A "match" is when a JSON field's name and sample value closely relate to the meaning of the header.
-- Do NOT rely on string similarity alone — use **semantic/contextual** understanding.
-- Avoid repeating the same JSON key for multiple matches unless unavoidable.
-- If a field has no valid values (empty list or meaningless data), skip it.
+🧠 Match rules:
+- Do NOT rely on string overlap alone — match based on meaning, context, and intent.
+- Fields with empty values should be skipped, but always find 3 of the best available.
+- You must still return 3 results even if the match is imperfect — prioritize **closeness of meaning**.
+- Avoid exact duplicate field names unless they provide different values.
+- If a header is vague or broad, choose the **most likely candidates** that relate to it in a business/sales context.
 
-Strict formatting:
-Return a valid JSON object like this:
+🚫 Never return:
+- Empty lists
+- Empty strings
+- Placeholder values (e.g. "N/A", "null", or "Metadata")
+- Repeat fields with the same sample value
+
+✅ Always:
+- Return exactly 3 distinct field–value objects per header
+- Include a representative value for each
+- Pick the most meaningful and populated data fields, not just string matches
+
+Output format (strict JSON):
 {{
   "Header1": [
-    {{ "field": "MatchingFieldName1", "value": "SampleValue1" }},
-    {{ "field": "MatchingFieldName2", "value": "SampleValue2" }},
-    {{ "field": "MatchingFieldName3", "value": "SampleValue3" }}
-  ],
-  "Header2": [
-    ...
+    {{ "field": "FieldName1", "value": "Example value 1" }},
+    {{ "field": "FieldName2", "value": "Example value 2" }},
+    {{ "field": "FieldName3", "value": "Example value 3" }}
   ],
   ...
 }}
 
-✅ Rules:
-- Always return **exactly 3** matches per header.
-- Do NOT leave any header empty.
-- Only include matches that are clearly related in meaning.
-- Never output empty string or blank values.
-- Use the most representative sample value for each field.
-
 Headers:
 {json.dumps(headers, indent=2)}
 
-Data JSON:
-{json.dumps(rhs_json, indent=2)[:4000]}  # truncated
+Data JSON (cleaned and partial):
+{json.dumps(rhs_json, indent=2)[:3500]}
 """.strip()
 
 @app.post("/api/match_fields")

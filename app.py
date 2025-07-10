@@ -44,7 +44,8 @@ You are an expert UI parser. Your task is to extract only the most likely **tabl
 - Prefer labels that are short (1–3 words) and commonly used to categorize rows of structured data.
 - These headers usually appear once per column and are followed by multiple values.
 - Do not include duplicates or empty items.
-- Output only a list of the top 10 most likely column headers.
+- Output only a list of the top 10 most likely column header.
+- ignore all empty fields which contain "" and not words - each output must have some type of response and will not be empty
 
 ### Output Format (strict JSON list of strings):
 [

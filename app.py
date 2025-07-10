@@ -53,7 +53,8 @@ Strict Rules:
 - ❌ If a field appears twice (like “Created”), only keep it once
 - ❌ Do not include duplicates under different names (e.g., “Sales Stage” twice with slightly different cases)
 - Include labels associated with status indicators - especially if they appear at the edge or top of a card or row. 
-- ✅ favor labels grouped with known column headers 
+- A field for the **deal title or name** 
+- A field for the **customer or client name** 
 - ✅ include unique, structured field labels that appear at the end of table rows or near other headers
 - ✅ select labels that appear once or appear early in the visual order as they are likely table header rows
 - Do include high-level field labels if they appear alone, early, or near table rows, treat them as structured metadata

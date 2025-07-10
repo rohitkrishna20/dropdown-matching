@@ -31,36 +31,30 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 
 ui_text = extract_figma_text(lhs_data)
 
-def make_prompt(labels: list[str]) -> str:
-    blob = "\n".join(f"- {t}" for t in labels)
+def make_prompt_for_top10_headers(text_chunks: list[str]) -> str:
+    flat_text = "\n".join(text_chunks)
     return f"""
-You are identifying column headers from raw Figma UI text extracted from a sales dashboard table.
+You are an expert UI parser. Your task is to extract only the most likely **table column headers** from a raw UI text dump.
 
-🧠 Your task:
-Return exactly 10 field names most likely used as table **column headers** (structured metadata). These should NOT be row values, buttons, filters, or status indicators.
+### Very Strict Instructions:
+- Only include **headers** that represent columns in a table, such as "Name", "Account", or "AI Score".
+- Do NOT include actual data entries, such as "Titan Edge" or "Momentum Group".
+- Do NOT include any label if the data field underneath it is **blank, missing, or empty**.
+- Do NOT include things like contact methods (e.g., “Web”), dates (unless used as headers), alert flags (e.g., “At Risk”), or generic text (e.g., “Open”, “Overview”).
+- Prefer labels that are short (1–3 words) and commonly used to categorize rows of structured data.
+- These headers usually appear once per column and are followed by multiple values.
+- Do not include duplicates or empty items.
+- Output only a list of the top 10 most likely column headers.
 
-✅ Include:
-- Only structured metadata used as column labels
-- Unique, descriptive terms (no repeats or vague labels)
-- Labels likely found at the top of table rows
-
-❌ Exclude:
-- Anything with the word "status", "metadata", "value", "info", "details", "date", or "time"
-- Terms from badges, cells, pipelines, or labels like "Qualify", "Negotiation"
-- Entries with company names, business terms (e.g., “Consulting”, “Solutions”)
-- Action items, styles, navigation, timestamps, stages, alerts, or vague terms
-
-📦 Output format:
-Return only a JSON object:
-{{
-  "header1": "___",
-  "header2": "___",
+### Output Format (strict JSON list of strings):
+[
+  "Header 1",
+  "Header 2",
   ...
-  "header10": "___"
-}}
+]
 
-Extracted UI Text:
-{blob}
+### Raw UI Text:
+{flat_text}
 """.strip()
 
 @app.get("/api/top10")

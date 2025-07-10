@@ -54,7 +54,7 @@ Strict Rules:
 - Do include high-level field labels if they appear alone, early, or near table rows, treat them as structured metadata
 - ✅ Include only descriptive field names used to label table columns
 - ❌ Exclude value-like terms such as "E-Mail", "Web" - these are row-level values, not column headers
-- ❌ Exclude "Status", "Status Indicators", or any term with "Status" — these are not table headers
+- ❌ NEVER INCLUDE "Status", "Status Indicators", or any term with "Status" — these are not table headers
 - ❌ Exclude generic or vague terms like “Value”, “Details”, “Date”, “Time”, or “Indicators”
 - ❌ Exclude terms that appear in cells or badges, not headers
 - ❌ If a field appears twice (like “Created”), only keep it once

@@ -31,7 +31,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 
 ui_text = extract_figma_text(lhs_data)
 
-def make_prompt_for_top10_headers(text_chunks: list[str]) -> str:
+def make_prompt(text_chunks: list[str]) -> str:
     flat_text = "\n".join(text_chunks)
     return f"""
 You are an expert UI parser. Your task is to extract only the most likely **table column headers** from a raw UI text dump.

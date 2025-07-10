@@ -45,8 +45,6 @@ These column headers represent structured fields (like customer name, status, sc
 🧠 Focus on identifying field names, not row values or UI labels.
 
 Strict Rules:
-- ✅ prefer structured field labels that represent system-generated metadata, like warnings
-Strict Rules:
 - ✅ Only include structured metadata field names that are likely used as column headers
 - ✅ Include only one unique field per row — no duplicates (if "Sales Stage" appears twice, include it only once)
 - ❌ Exclude "Status", "Status Indicators", or any term with "Status" — these are not table headers
@@ -78,6 +76,7 @@ Strict Rules:
 - ❌ If a phrase contains words like “Group”, “Edge”, “Consulting”, “Solutions”, “Health”, “Global”, or “Services”, exclude it — these are likely business names or customers
 - ❌ Exclude terms like “Status”, “Creation Date”, “Date”, or “Time” — these are often metadata rows or timestamps, not true column headers
 - ❌ Exclude generic labels like “Value”, “Info”, “Details”, or “Stage” unless part of a specific known column label - do not include any header that contains status
+- Once again make sure to ignore any "status" headers and never have two of the same headers outputted at the same time for ex. (sales stage and sales stage) should never both be outputted
 
 🎯 Return ONLY a JSON object with keys "header1" through "header10"
 

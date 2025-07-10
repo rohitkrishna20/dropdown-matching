@@ -54,7 +54,8 @@ Strict Rules:
 - ❌ Exclude pipeline stages (like “Qualify”, “Negotiation”, “Discovery”)
 - ❌ Exclude status badges or alert values (like “Due to closure”, “At Risk”)
 - ❌ Exclude anything that sounds like a text style, label category, or design artifact
-- ❌ If a phrase includes "metadata" - reject it
+- ❌ Exclude any header that contains "metadata"
+- EXCLUDE any header containing the word "status"
 - ❌ Exclude action buttons, tabs, filters, or navigation
 - ❌ Do NOT include timestamps or date examples
 - ❌ Do NOT include repeated terms like “Opportunity”, “Activity”, “Quote”, “Lead”

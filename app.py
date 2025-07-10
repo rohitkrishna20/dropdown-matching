@@ -62,6 +62,9 @@ Strict Rules:
 - ❌ Avoid stage-related phrases, alerts, or row-level values such as "status" - DO NOT INCLUDE "STATUS"
 - ❌ Exclude anything that looks like data content instead of a label
 - ❌ Do NOT include any values that appear inside cells or badges (e.g. “Web”, “Direct Mail”)
+- ❌ Exclude entries with names, company references, connectivity types, or network technologies (e.g. “MPLS”, “SAT”, “Connectivity”)
+- ❌ Exclude any item containing multiple segments separated by dashes (e.g. "A - B - C") — these are likely data entries, not headers
+- ❌ If a phrase contains words like “Group”, “Edge”, “Consulting”, “Solutions”, “Health”, “Global”, or “Services”, exclude it — these are likely business names or customers
 
 🎯 Return ONLY a JSON object with keys "header1" through "header10"
 

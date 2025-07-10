@@ -185,11 +185,15 @@ Return a valid JSON object like this:
 }}
 
 ✅ Rules:
-- Always return **exactly 3** matches per header.
-- Do NOT leave any header empty.
-- Only include matches that are clearly related in meaning.
-- Never output empty string or blank values.
-- Use the most representative sample value for each field.
+- ✅ Always:
+- Return **exactly 3 distinct field–value objects per header**
+- Even if the match is imperfect, choose the closest semantic fit
+- Use only non-empty values from the JSON
+- Format the output as strict JSON only — no commentary or explanation
+🎯 Priority Guidelines:
+1. Match based on **meaning**, not name (e.g., “Created” might match “createdOn”)
+2. Prefer fields with clear values (e.g., “2025-03-17”, “Web”, “Sales visit”)
+3. Avoid dummy/placeholder/empty strings
 
 Headers:
 {json.dumps(headers, indent=2)}
@@ -210,14 +214,18 @@ def api_match_fields():
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        try:
+                try:
             parsed = json.loads(raw)
         except Exception:
             matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            parsed = {k: re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
-                      for k, v in matches}
+            parsed = {}
 
-        return jsonify(parsed)
+            for k, v in matches:
+                field_value_pairs = re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
+                fixed = [{"field": f, "value": val} for f, val in field_value_pairs[:3]]
+                while len(fixed) < 3:
+                    fixed.append({"field": "[empty]", "value": "[empty]"})
+                parsed[k] = fixed
 
     except Exception as e:
         return jsonify({

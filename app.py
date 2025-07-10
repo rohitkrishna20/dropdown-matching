@@ -190,6 +190,8 @@ Return a valid JSON object like this:
 - Even if the match is imperfect, choose the closest semantic fit
 - Use only non-empty values from the JSON
 - Format the output as strict JSON only — no commentary or explanation
+- Each field must have a meaningful, non-empty value from the data
+- If the field is not an exact match, choose the best semantic alternatives
 🎯 Priority Guidelines:
 1. Match based on **meaning**, not name (e.g., “Created” might match “createdOn”)
 2. Prefer fields with clear values (e.g., “2025-03-17”, “Web”, “Sales visit”)

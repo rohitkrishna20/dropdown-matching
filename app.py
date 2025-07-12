@@ -263,22 +263,22 @@ Respond in this strict format:
 
         # Now attach values — ensure non-empty values only
         # Now attach actual values from data
-final_output = {}
-for header, items in field_only_result.items():
-    enriched = []
-    for item in items:
-        field = item["field"]
-        value = "[empty]"
-
-        for record in rhs_data:
-            if isinstance(record, dict) and field in record:
-                temp = record[field]
-                if isinstance(temp, str) and temp.strip():
-                    value = temp.strip()
-                    break
-                elif isinstance(temp, (list, dict)) and temp:
-                    value = json.dumps(temp)
-                    break
+        final_output = {}
+        for header, items in field_only_result.items():
+            enriched = []
+            for item in items:
+                field = item["field"]
+                value = "[empty]"
+        
+                for record in rhs_data:
+                    if isinstance(record, dict) and field in record:
+                        temp = record[field]
+                        if isinstance(temp, str) and temp.strip():
+                            value = temp.strip()
+                            break
+                        elif isinstance(temp, (list, dict)) and temp:
+                            value = json.dumps(temp)
+                            break
 
         enriched.append({"field": field, "value": value})
     final_output[header] = enriched

@@ -222,7 +222,7 @@ def api_match_fields():
                 field_names.update(record.keys())
         field_names_only = list(field_names)
 
-        # Build Ollama prompt
+        # Prompt Ollama
         match_prompt = f"""
 You are a field matcher.
 
@@ -233,17 +233,13 @@ And here is a list of available field names from a JSON dataset:
 {json.dumps(field_names_only, indent=2)}
 
 For each UI header, return the 3 most semantically related fields.
-Return exactly 3 per header, and format as follows:
+Return exactly 3 per header, and only field names (not values).
 
+Respond in this strict format:
 {{
-  "Header1": [
-    {{ "field": "field1" }},
-    {{ "field": "field2" }},
-    {{ "field": "field3" }}
-  ],
-  "Header2": [
-    ...
-  ]
+  "Header1": ["field1", "field2", "field3"],
+  "Header2": ["fieldA", "fieldB", "fieldC"],
+  ...
 }}
         """.strip()
 
@@ -255,10 +251,9 @@ Return exactly 3 per header, and format as follows:
             parsed = json.loads(raw)
         except Exception:
             parsed = {}
-            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            for header, block in matches:
-                fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
-                parsed[header] = [{"field": f} for f in fields[:3]]
+            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\s*\]', raw)
+            for header, f1, f2, f3 in matches:
+                parsed[header] = [f1, f2, f3]
 
         return jsonify(parsed)
 

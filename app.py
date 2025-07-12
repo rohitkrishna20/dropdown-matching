@@ -280,7 +280,6 @@ def api_match_fields():
             "error": "Failed to match fields",
             "details": str(e)
         }), 500
-
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 

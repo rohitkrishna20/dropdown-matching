@@ -216,42 +216,20 @@ def api_match_fields():
         headers = [h for h in headers if h.strip()]
 
         # Build the list of unique field names across all records
+                # Build a pool of all non-empty field-value pairs across records
         all_field_value_pool = {}
         for record in rhs_data:
-             if isinstance(record, dict) and field in record:
-                value = record[field]
-             if isinstance(value, str) and value.strip():
-                enriched.append({"field": field, "value": value.strip()})
-                used_fields.add(field)
-                break
+            if isinstance(record, dict):
+                for key, val in record.items():
+                    if isinstance(val, str) and val.strip():
+                        all_field_value_pool[key] = val.strip()
 
-        # Send only keys to Ollama for matching
-        field_names_only = list(all_field_value_pool.keys())
-
-        match_prompt = f"""
-You are a field matcher.
-
-Here are UI headers from a dashboard:
-{json.dumps(headers, indent=2)}
-
-And here is a list of available field names from a JSON dataset:
-{json.dumps(field_names_only, indent=2)}
-
-For each UI header, return the 3 most semantically related fields.
-Return exactly 3 per header, and only field names (not values).
-
-Respond in this strict format:
-{{
-  "Header1": [{{"field": "FieldName1"}}, {{"field": "FieldName2"}}, {{"field": "FieldName3"}}],
-  ...
-}}
-        """.strip()
-
-        # Call Ollama
+        # Call Ollama for top 3 semantic field matches
+        match_prompt = make_match_prompt(headers, rhs_data)
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
         raw = resp["message"]["content"]
 
-        # Parse Ollama response
+        # Try parsing the response as JSON
         try:
             field_only_result = json.loads(raw)
         except Exception:
@@ -261,15 +239,17 @@ Respond in this strict format:
                 fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
                 field_only_result[header] = [{"field": f} for f in fields[:3]]
 
-        # Now attach values — ensure non-empty values only
-        # Now attach actual values from data
+        # Final enrichment: attach values from rhs_data
         final_output = {}
+
         for header, items in field_only_result.items():
             enriched = []
+            used_fields = set()
+
             for item in items:
-                field = item["field"]
+                field = item.get("field")
                 value = "[empty]"
-        
+
                 for record in rhs_data:
                     if isinstance(record, dict) and field in record:
                         temp = record[field]
@@ -280,10 +260,10 @@ Respond in this strict format:
                             value = json.dumps(temp)
                             break
 
-        enriched.append({"field": field, "value": value})
-    final_output[header] = enriched
+                enriched.append({"field": field, "value": value})
+                used_fields.add(field)
 
-            # If < 3 results, backfill from any other field with a non-empty value
+            # Pad with any non-empty fields if less than 3
             if len(enriched) < 3:
                 for field, value in all_field_value_pool.items():
                     if field not in used_fields:

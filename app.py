@@ -215,43 +215,79 @@ def api_match_fields():
         headers = list(top10_response.get_json().values())
         headers = [h for h in headers if h.strip()]
 
-        # Aggregate non-empty field-value pairs from all records
-        all_field_value_pairs = {}
+        # Build the list of unique field names across all records
+        all_field_value_pool = {}
         for record in rhs_data:
-            filtered = filter_non_empty_fields(record)
-            for key, value in filtered.items():
-                # Only keep the first meaningful value for each key
-                if key not in all_field_value_pairs:
-                    all_field_value_pairs[key] = value
+            if isinstance(record, dict):
+                for key, val in record.items():
+                    if key not in all_field_value_pool and isinstance(val, str) and val.strip():
+                        all_field_value_pool[key] = val.strip()
 
-        # Build prompt
-        prompt = make_match_prompt(headers, all_field_value_pairs)
+        # Send only keys to Ollama for matching
+        field_names_only = list(all_field_value_pool.keys())
+
+        match_prompt = f"""
+You are a field matcher.
+
+Here are UI headers from a dashboard:
+{json.dumps(headers, indent=2)}
+
+And here is a list of available field names from a JSON dataset:
+{json.dumps(field_names_only, indent=2)}
+
+For each UI header, return the 3 most semantically related fields.
+Return exactly 3 per header, and only field names (not values).
+
+Respond in this strict format:
+{{
+  "Header1": [{{"field": "FieldName1"}}, {{"field": "FieldName2"}}, {{"field": "FieldName3"}}],
+  ...
+}}
+        """.strip()
 
         # Call Ollama
-        resp = ollama.chat(model="llama3.2",
-                           messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
         raw = resp["message"]["content"]
 
-        # Try parsing Ollama response
-                # Try parsing Ollama response
+        # Parse Ollama response
         try:
             field_only_result = json.loads(raw)
         except Exception:
-            # fallback regex if JSON fails
             field_only_result = {}
-            blocks = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            for header, block in blocks:
+            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
+            for header, block in matches:
                 fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
                 field_only_result[header] = [{"field": f} for f in fields[:3]]
 
-        # Now attach actual values from data
+        # Now attach values — ensure non-empty values only
         final_output = {}
         for header, items in field_only_result.items():
             enriched = []
+            used_fields = set()
+
+            # Search each Ollama-suggested field for a non-empty value
             for item in items:
                 field = item["field"]
-                value = next((r.get(field) for r in rhs_data if field in r and r.get(field)), "")
-                enriched.append({"field": field, "value": value if value else "[empty]"})
+                if field in used_fields:
+                    continue
+                for record in rhs_data:
+                    value = record.get(field, "")
+                    if isinstance(value, str) and value.strip():
+                        enriched.append({"field": field, "value": value.strip()})
+                        used_fields.add(field)
+                        break
+                if len(enriched) == 3:
+                    break
+
+            # If < 3 results, backfill from any other field with a non-empty value
+            if len(enriched) < 3:
+                for field, value in all_field_value_pool.items():
+                    if field not in used_fields:
+                        enriched.append({"field": field, "value": value})
+                        used_fields.add(field)
+                    if len(enriched) == 3:
+                        break
+
             final_output[header] = enriched
 
         return jsonify(final_output)

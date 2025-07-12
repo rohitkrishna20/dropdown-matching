@@ -207,52 +207,60 @@ Data JSON:
 @app.post("/api/match_fields")
 def api_match_fields():
     try:
-        # Get headers from Ollama top 10
+        # Get headers from /api/top10
         top10_response = api_top10()
         if not top10_response.is_json:
             return jsonify({"error": "Top 10 headers response is not JSON"}), 500
 
         headers = list(top10_response.get_json().values())
-
-        # Only take non-empty headers
         headers = [h for h in headers if h.strip()]
 
-        # Use first record from RHS JSON
-        first_rhs_record = rhs_data[0] if isinstance(rhs_data, list) else rhs_data
-        filtered_rhs = filter_non_empty_fields(first_rhs_record)
+        # Aggregate non-empty field-value pairs from all records
+        all_field_value_pairs = {}
+        for record in rhs_data:
+            filtered = filter_non_empty_fields(record)
+            for key, value in filtered.items():
+                # Only keep the first meaningful value for each key
+                if key not in all_field_value_pairs:
+                    all_field_value_pairs[key] = value
 
-        # Generate prompt
-        prompt = make_match_prompt(headers, filtered_rhs)
+        # Build prompt
+        prompt = make_match_prompt(headers, all_field_value_pairs)
 
         # Call Ollama
         resp = ollama.chat(model="llama3.2",
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Try parsing structured JSON
+        # Try parsing Ollama response
+                # Try parsing Ollama response
         try:
-            parsed = json.loads(raw)
+            field_only_result = json.loads(raw)
         except Exception:
-            # Fallback: manually extract using regex
-            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-            parsed = {}
-            for k, v in matches:
-                field_value_pairs = re.findall(
-                    r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v
-                )
-                fixed = [{"field": f, "value": val} for f, val in field_value_pairs[:3]]
-                while len(fixed) < 3:
-                    fixed.append({"field": "[empty]", "value": "[empty]"})
-                parsed[k] = fixed
+            # fallback regex if JSON fails
+            field_only_result = {}
+            blocks = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
+            for header, block in blocks:
+                fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
+                field_only_result[header] = [{"field": f} for f in fields[:3]]
 
-        return jsonify(parsed)
+        # Now attach actual values from data
+        final_output = {}
+        for header, items in field_only_result.items():
+            enriched = []
+            for item in items:
+                field = item["field"]
+                value = next((r.get(field) for r in rhs_data if field in r and r.get(field)), "")
+                enriched.append({"field": field, "value": value if value else "[empty]"})
+            final_output[header] = enriched
+
+        return jsonify(final_output)
 
     except Exception as e:
         return jsonify({
-            "error": "Failed to match fields",
+            "error": "Failed to match fields from all records",
             "details": str(e)
         }), 500
-@app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 

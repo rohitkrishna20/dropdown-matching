@@ -224,69 +224,69 @@ def api_match_fields():
 
         # Prompt Ollama
 # Build a pool of all non-empty field-value pairs across records
-all_field_value_pool = {}
-for record in rhs_data:
-    if isinstance(record, dict):
-        for key, val in record.items():
-            if isinstance(val, str) and val.strip():
-                all_field_value_pool[key] = val.strip()
-
-# Call Ollama for top 3 semantic field matches
-match_prompt = make_match_prompt(headers, rhs_data)
-resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
-raw = resp["message"]["content"]
-
-# Try parsing the response as JSON
-try:
-    field_only_result = json.loads(raw)
-except Exception:
-    field_only_result = {}
-    matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
-    for header, block in matches:
-        fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
-        field_only_result[header] = [{"field": f} for f in fields[:3]]
+        all_field_value_pool = {}
+        for record in rhs_data:
+            if isinstance(record, dict):
+                for key, val in record.items():
+                    if isinstance(val, str) and val.strip():
+                        all_field_value_pool[key] = val.strip()
+        
+        # Call Ollama for top 3 semantic field matches
+        match_prompt = make_match_prompt(headers, rhs_data)
+        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
+        raw = resp["message"]["content"]
+        
+        # Try parsing the response as JSON
+        try:
+            field_only_result = json.loads(raw)
+        except Exception:
+            field_only_result = {}
+            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
+            for header, block in matches:
+                fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
+                field_only_result[header] = [{"field": f} for f in fields[:3]]
 
 # Final enrichment: attach values from rhs_data
-final_output = {}
-
-for header, items in field_only_result.items():
-    enriched = []
-    used_fields = set()
-
-    for item in items:
-        field = item.get("field")
-        value = "[empty]"
-
-        for record in rhs_data:
-            if isinstance(record, dict) and field in record:
-                temp = record[field]
-                if isinstance(temp, str) and temp.strip():
-                    value = temp.strip()
-                    break
-                elif isinstance(temp, (list, dict)) and temp:
-                    value = json.dumps(temp)
-                    break
-
-        enriched.append({"field": field, "value": value})
-        used_fields.add(field)
-
-    # Pad with any non-empty fields if less than 3
-    if len(enriched) < 3:
-        for field, value in all_field_value_pool.items():
-            if field not in used_fields:
+        final_output = {}
+        
+        for header, items in field_only_result.items():
+            enriched = []
+            used_fields = set()
+        
+            for item in items:
+                field = item.get("field")
+                value = "[empty]"
+        
+                for record in rhs_data:
+                    if isinstance(record, dict) and field in record:
+                        temp = record[field]
+                        if isinstance(temp, str) and temp.strip():
+                            value = temp.strip()
+                            break
+                        elif isinstance(temp, (list, dict)) and temp:
+                            value = json.dumps(temp)
+                            break
+        
                 enriched.append({"field": field, "value": value})
                 used_fields.add(field)
-            if len(enriched) == 3:
-                break
-
-    final_output[header] = enriched
-
-return jsonify(final_output)
-    except Exception as e:
-        return jsonify({
-            "error": "Failed to match fields",
-            "details": str(e)
-        }), 500
+        
+            # Pad with any non-empty fields if less than 3
+            if len(enriched) < 3:
+                for field, value in all_field_value_pool.items():
+                    if field not in used_fields:
+                        enriched.append({"field": field, "value": value})
+                        used_fields.add(field)
+                    if len(enriched) == 3:
+                        break
+        
+            final_output[header] = enriched
+        
+        return jsonify(final_output)
+            except Exception as e:
+                return jsonify({
+                    "error": "Failed to match fields",
+                    "details": str(e)
+                }), 500
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 

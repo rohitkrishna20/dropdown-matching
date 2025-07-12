@@ -207,34 +207,51 @@ Data JSON:
 @app.post("/api/match_fields")
 def api_match_fields():
     try:
-        top10_resp = api_top10().json
-        headers = list(top10_resp.values())
+        # Get headers from Ollama top 10
+        top10_response = api_top10()
+        if not top10_response.is_json:
+            return jsonify({"error": "Top 10 headers response is not JSON"}), 500
 
-        prompt = make_match_prompt(headers, rhs_data)
+        headers = list(top10_response.get_json().values())
 
+        # Only take non-empty headers
+        headers = [h for h in headers if h.strip()]
+
+        # Use first record from RHS JSON
+        first_rhs_record = rhs_data[0] if isinstance(rhs_data, list) else rhs_data
+        filtered_rhs = filter_non_empty_fields(first_rhs_record)
+
+        # Generate prompt
+        prompt = make_match_prompt(headers, filtered_rhs)
+
+        # Call Ollama
         resp = ollama.chat(model="llama3.2",
                            messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-                try:
+        # Try parsing structured JSON
+        try:
             parsed = json.loads(raw)
         except Exception:
+            # Fallback: manually extract using regex
             matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
             parsed = {}
-
             for k, v in matches:
-                field_value_pairs = re.findall(r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v)
+                field_value_pairs = re.findall(
+                    r'"field"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*"([^"]+)"', v
+                )
                 fixed = [{"field": f, "value": val} for f, val in field_value_pairs[:3]]
                 while len(fixed) < 3:
                     fixed.append({"field": "[empty]", "value": "[empty]"})
                 parsed[k] = fixed
+
+        return jsonify(parsed)
 
     except Exception as e:
         return jsonify({
             "error": "Failed to match fields",
             "details": str(e)
         }), 500
-
 @app.get("/")
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})

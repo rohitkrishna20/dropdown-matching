@@ -223,40 +223,65 @@ def api_match_fields():
         field_names_only = list(field_names)
 
         # Prompt Ollama
-        match_prompt = f"""
-You are a field matcher.
+# Build a pool of all non-empty field-value pairs across records
+all_field_value_pool = {}
+for record in rhs_data:
+    if isinstance(record, dict):
+        for key, val in record.items():
+            if isinstance(val, str) and val.strip():
+                all_field_value_pool[key] = val.strip()
 
-Here are UI headers from a dashboard:
-{json.dumps(headers, indent=2)}
+# Call Ollama for top 3 semantic field matches
+match_prompt = make_match_prompt(headers, rhs_data)
+resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
+raw = resp["message"]["content"]
 
-And here is a list of available field names from a JSON dataset:
-{json.dumps(field_names_only, indent=2)}
+# Try parsing the response as JSON
+try:
+    field_only_result = json.loads(raw)
+except Exception:
+    field_only_result = {}
+    matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*(.*?)\s*\]', raw, re.DOTALL)
+    for header, block in matches:
+        fields = re.findall(r'"field"\s*:\s*"([^"]+)"', block)
+        field_only_result[header] = [{"field": f} for f in fields[:3]]
 
-For each UI header, return the 3 most semantically related fields.
-Return exactly 3 per header, and only field names (not values).
+# Final enrichment: attach values from rhs_data
+final_output = {}
 
-Respond in this strict format:
-{{
-  "Header1": ["field1", "field2", "field3"],
-  "Header2": ["fieldA", "fieldB", "fieldC"],
-  ...
-}}
-        """.strip()
+for header, items in field_only_result.items():
+    enriched = []
+    used_fields = set()
 
-        # Call Ollama
-        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": match_prompt}])
-        raw = resp["message"]["content"]
+    for item in items:
+        field = item.get("field")
+        value = "[empty]"
 
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed = {}
-            matches = re.findall(r'"([^"]+)"\s*:\s*\[\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\s*\]', raw)
-            for header, f1, f2, f3 in matches:
-                parsed[header] = [f1, f2, f3]
+        for record in rhs_data:
+            if isinstance(record, dict) and field in record:
+                temp = record[field]
+                if isinstance(temp, str) and temp.strip():
+                    value = temp.strip()
+                    break
+                elif isinstance(temp, (list, dict)) and temp:
+                    value = json.dumps(temp)
+                    break
 
-        return jsonify(parsed)
+        enriched.append({"field": field, "value": value})
+        used_fields.add(field)
 
+    # Pad with any non-empty fields if less than 3
+    if len(enriched) < 3:
+        for field, value in all_field_value_pool.items():
+            if field not in used_fields:
+                enriched.append({"field": field, "value": value})
+                used_fields.add(field)
+            if len(enriched) == 3:
+                break
+
+    final_output[header] = enriched
+
+return jsonify(final_output)
     except Exception as e:
         return jsonify({
             "error": "Failed to match fields",

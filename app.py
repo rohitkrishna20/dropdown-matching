@@ -218,12 +218,12 @@ def api_match_fields():
         # Build the list of unique field names across all records
         all_field_value_pool = {}
         for record in rhs_data:
-    if isinstance(record, dict):
-        value = record.get(field, "")
-        if isinstance(value, str) and value.strip():
-            enriched.append({"field": field, "value": value.strip()})
-            used_fields.add(field)
-            break
+            if isinstance(record, dict):
+                value = record.get(field, "")
+                if isinstance(value, str) and value.strip():
+                    enriched.append({"field": field, "value": value.strip()})
+                    used_fields.add(field)
+                    break
 
         # Send only keys to Ollama for matching
         field_names_only = list(all_field_value_pool.keys())

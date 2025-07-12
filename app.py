@@ -262,24 +262,26 @@ Respond in this strict format:
                 field_only_result[header] = [{"field": f} for f in fields[:3]]
 
         # Now attach values — ensure non-empty values only
-        final_output = {}
-        for header, items in field_only_result.items():
-            enriched = []
-            used_fields = set()
+        # Now attach actual values from data
+final_output = {}
+for header, items in field_only_result.items():
+    enriched = []
+    for item in items:
+        field = item["field"]
+        value = "[empty]"
 
-            # Search each Ollama-suggested field for a non-empty value
-            for item in items:
-                field = item["field"]
-                if field in used_fields:
-                    continue
-                for record in rhs_data:
-                    value = record.get(field, "")
-                    if isinstance(value, str) and value.strip():
-                        enriched.append({"field": field, "value": value.strip()})
-                        used_fields.add(field)
-                        break
-                if len(enriched) == 3:
+        for record in rhs_data:
+            if isinstance(record, dict) and field in record:
+                temp = record[field]
+                if isinstance(temp, str) and temp.strip():
+                    value = temp.strip()
                     break
+                elif isinstance(temp, (list, dict)) and temp:
+                    value = json.dumps(temp)
+                    break
+
+        enriched.append({"field": field, "value": value})
+    final_output[header] = enriched
 
             # If < 3 results, backfill from any other field with a non-empty value
             if len(enriched) < 3:

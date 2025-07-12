@@ -282,11 +282,11 @@ def api_match_fields():
             final_output[header] = enriched
         
         return jsonify(final_output)
-            except Exception as e:
-                return jsonify({
-                    "error": "Failed to match fields",
-                    "details": str(e)
-                }), 500
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to match fields",
+            "details": str(e)
+        }), 500
 def home():
     return jsonify({"message": "GET /api/top10 to extract table headers from Figma UI"})
 

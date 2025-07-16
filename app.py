@@ -92,28 +92,31 @@ def api_top10():
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Extract headers from model response
+        # Extract headers from model output
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        headers = [h.strip() for h in headers if h.strip()]  # Remove blanks
+        headers = [h.strip() for h in headers if h.strip()]  # Only non-empty
 
-        # Remove duplicates while preserving order
+        # Deduplicate and trim to top 10
         seen = set()
-        headers = [h for h in headers if h.lower() not in seen and not seen.add(h.lower())]
+        unique_headers = []
+        for h in headers:
+            if h.lower() not in seen:
+                seen.add(h.lower())
+                unique_headers.append(h)
+            if len(unique_headers) == 10:
+                break
 
-        # Keep only the first 10 valid headers
-        headers = headers[:10]
+        output = {f"header{i+1}": unique_headers[i] for i in range(len(unique_headers))}
+        for i in range(len(unique_headers), 10):
+            output[f"header{i+1}"] = ""
 
-        # Build output JSON
-        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
         return jsonify(output)
-
     except Exception as e:
         return jsonify({
             "error": "Header extraction failed",
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
-
 
 # ──────── Load Right-hand Data JSON (DataRightHS.json) ────────
 rhs_path = Path("data/DataRightHS.json")

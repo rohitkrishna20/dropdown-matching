@@ -80,10 +80,9 @@ def api_top10():
 
 # ───────────── LangChain Matching Logic ─────────────
 rhs_path = Path("data/DataRightHS.json")
-rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
+raw = json.loads(rhs_path.read_text(encoding="utf-8"))
+rhs_data = raw["data"] if "data" in raw else raw
 
-print("RHS Length:", len(rhs_data))
-print("RHS first item:", rhs_data[0] if rhs_data else "EMPTY")
 def build_faiss_index(rhs_data: list[dict]):
     all_fields = set()
     for row in rhs_data:
@@ -103,7 +102,7 @@ def build_faiss_index(rhs_data: list[dict]):
         raise RuntimeError(f"FAISS index creation failed: {str(e)}")
 
     return vectorstore
-faiss_index = build_faiss_index(DataRightHS.json)
+faiss_index = build_faiss_index(rhs_data)
 
 @app.post("/api/match_fields")
 def api_match_fields():

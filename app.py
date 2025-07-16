@@ -101,7 +101,7 @@ def build_faiss_index(rhs_data: list[dict]):
         raise RuntimeError(f"FAISS index creation failed: {str(e)}")
 
     return vectorstore
-faiss_index = build_faiss_index(rhs_data)
+faiss_index = build_faiss_index(DataRightHS.json)
 
 @app.post("/api/match_fields")
 def api_match_fields():

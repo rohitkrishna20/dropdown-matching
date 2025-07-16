@@ -73,9 +73,10 @@ def api_top10():
         headers = [h.strip() for h in headers if h.strip()]
         output = {f"header{i+1}": headers[i] for i in range(len(headers))}
 
-# Fill remaining headers (if fewer than 10) with placeholders or skip them
-for i in range(len(headers), 10):
-    output[f"header{i+1}"] = ""  # or use f"missing_{i+1}"aders[i] if i < len(headers) else "" for i in range(10)}
+        # Fill remaining headers (if fewer than 10) with empty strings
+        for i in range(len(headers), 10):
+            output[f"header{i+1}"] = ""
+
         return jsonify(output)
     except Exception as e:
         return jsonify({
@@ -88,7 +89,7 @@ for i in range(len(headers), 10):
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))
 
-# Unwrap nested "data" key if present
+# Unwrap nested "items" key if present
 rhs_data = raw_rhs.get("items") if isinstance(raw_rhs, dict) and "items" in raw_rhs else raw_rhs
 
 def build_faiss_index(rhs_data: list[dict]):

@@ -39,18 +39,33 @@ ui_text = extract_figma_text(lhs_data)
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are analyzing raw UI text from a sales dashboard built in Figma. Extract the **10 best column headers** from this text.
+You are extracting **structured column headers** from raw UI text taken from a sales dashboard in Figma.
 
-Follow these strict rules:
-- ✅ Must be structured field names used to label columns
-- ✅ Must be unique
-- ❌ Never include "Status", "Date", or "Value"
-- ❌ Exclude generic or vague labels, pipeline stages, or alert messages
-- ❌ Exclude values like “Web”, “E-Mail”, “Due to closure”
-- Return only 10 distinct, non-empty column headers in strict JSON format.
-- Never return empty strings or placeholders.
+The dashboard contains a large data table with records and metadata. Your task is to extract the **10 most likely table column headers** based on the raw text.
 
-Return only:
+🧠 Column headers are short, structured field names shown at the **top of a table column** (e.g., "Name", "AI Score", "Created", "Sales Stage").
+
+They are **NOT**:
+- ❌ status messages
+- ❌ vague terms like “Value”, “Details”, “Date”, “Status”, “Info”
+- ❌ data entries like “Web”, “Email”, “Direct Mail”
+- ❌ alert phrases like “Due to closure”, “At Risk”
+- ❌ customer or business names like “Health Group”, “Global Edge”
+- ❌ anything containing “status”, “connectivity”, “services”, “solution”, “consulting”, etc.
+- ❌ duplicate headers (e.g., two versions of “Sales Stage” — keep one only)
+
+✅ Column headers usually appear:
+- near the top or left edge of a table
+- once per column
+- with short, descriptive names like:
+  - "Name"
+  - "Sales Stage"
+  - "Created"
+  - "Probability"
+  - "AI Score"
+  - "Owner"
+
+🎯 Your job is to return 10 unique column headers **only**, using this format:
 {{
   "header1": "...",
   "header2": "...",
@@ -58,7 +73,15 @@ Return only:
   "header10": "..."
 }}
 
-Raw Text:
+DO NOT include:
+- status terms
+- repeated or blank entries
+- vague/generic terms
+- row data values
+- long company names
+- fields with "status", "info", or "value"
+
+Raw UI text:
 {blob}
 """.strip()
 

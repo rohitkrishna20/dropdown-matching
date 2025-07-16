@@ -1,14 +1,14 @@
 from flask import Flask, request, jsonify
 from pathlib import Path
-import json, re
+import json, re, ollama
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-import ollama
+from langchain.text_splitter import CharacterTextSplitter
 
 app = Flask(__name__)
 
-# ───────────── Load Figma UI JSON ─────────────
+# ──────── Load Figma UI JSON ────────
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
@@ -32,7 +32,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # remove duplicates, preserve order
+    return list(dict.fromkeys(out))  # de-dupe
 
 ui_text = extract_figma_text(lhs_data)
 
@@ -41,14 +41,14 @@ def make_prompt(labels: list[str]) -> str:
     return f"""
 You are analyzing raw UI text from a sales dashboard built in Figma. Extract the **10 best column headers** from this text.
 
-Strict rules:
+Follow these strict rules:
 - ✅ Must be structured field names used to label columns
 - ✅ Must be unique
 - ❌ Never include "Status", "Date", or "Value"
-- ❌ Exclude generic/vague labels, pipeline stages, alert messages
+- ❌ Exclude generic or vague labels, pipeline stages, or alert messages
 - ❌ Exclude values like “Web”, “E-Mail”, “Due to closure”
 
-Return JSON only:
+Return only:
 {{
   "header1": "...",
   "header2": "...",
@@ -77,17 +77,24 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ───────────── Load Right-Hand Side JSON ─────────────
+# ──────── Load Right-hand Data JSON (DataRightHS.json) ────────
 rhs_path = Path("data/DataRightHS.json")
-raw = json.loads(rhs_path.read_text(encoding="utf-8"))
-rhs_data = raw["data"] if "data" in raw else raw
+raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))
+
+# Unwrap nested "data" key if present
+rhs_data = raw_rhs["data"] if isinstance(raw_rhs, dict) and "data" in raw_rhs else raw_rhs
 
 def build_faiss_index(rhs_data: list[dict]):
     all_fields = set()
 
+    if not isinstance(rhs_data, list):
+        raise ValueError("Right-hand data must be a list of dictionaries.")
+
     for row in rhs_data:
         if isinstance(row, dict):
-            all_fields.update(k for k in row.keys() if isinstance(k, str) and k.strip())
+            for k in row.keys():
+                if isinstance(k, str) and k.strip():
+                    all_fields.add(k.strip())
 
     if not all_fields:
         raise ValueError("❌ No field names found in right-hand data.")
@@ -101,6 +108,7 @@ faiss_index = build_faiss_index(rhs_data)
 @app.post("/api/match_fields")
 def api_match_fields():
     try:
+        # Get headers dynamically
         top10 = api_top10()
         if not top10.is_json:
             return jsonify({"error": "Top 10 headers failed"}), 500

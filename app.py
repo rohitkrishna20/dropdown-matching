@@ -82,7 +82,7 @@ rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))
 
 # Unwrap nested "data" key if present
-rhs_data = raw_rhs["data"] if isinstance(raw_rhs, dict) and "data" in raw_rhs else raw_rhs
+rhs_data = raw_rhs.get("items") if isinstance(raw_rhs, dict) and "items" in raw_rhs else raw_rhs
 
 def build_faiss_index(rhs_data: list[dict]):
     all_fields = set()

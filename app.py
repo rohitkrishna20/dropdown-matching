@@ -47,6 +47,8 @@ Follow these strict rules:
 - ❌ Never include "Status", "Date", or "Value"
 - ❌ Exclude generic or vague labels, pipeline stages, or alert messages
 - ❌ Exclude values like “Web”, “E-Mail”, “Due to closure”
+- Return only 10 distinct, non-empty column headers in strict JSON format.
+- Never return empty strings or placeholders.
 
 Return only:
 {{
@@ -67,8 +69,13 @@ def api_top10():
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+        # Extract up to 10 valid (non-empty) headers
         headers = [h.strip() for h in headers if h.strip()]
-        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
+        output = {f"header{i+1}": headers[i] for i in range(len(headers))}
+
+# Fill remaining headers (if fewer than 10) with placeholders or skip them
+for i in range(len(headers), 10):
+    output[f"header{i+1}"] = ""  # or use f"missing_{i+1}"aders[i] if i < len(headers) else "" for i in range(10)}
         return jsonify(output)
     except Exception as e:
         return jsonify({

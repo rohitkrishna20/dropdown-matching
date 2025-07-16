@@ -94,6 +94,19 @@ def build_faiss_index(rhs_data: list[dict]):
         raise ValueError("❌ No field names found in right-hand data.")
 
     docs = [Document(page_content=field) for field in all_fields]
+    def build_faiss_index(rhs_data: list[dict]):
+    all_fields = set()
+
+    for row in rhs_data:
+        if isinstance(row, dict):
+            all_fields.update(k for k in row.keys() if isinstance(k, str) and k.strip())
+
+    if not all_fields:
+        raise ValueError("❌ No field names found in right-hand data.")
+
+    docs = [Document(page_content=field) for field in all_fields]
+    embeddings = OllamaEmbeddings(model="llama3.2")
+    return FAISS.from_documents(docs, embeddings)
     embeddings = OllamaEmbeddings(model="llama3.2")
     return FAISS.from_documents(docs, embeddings)
 faiss_index = build_faiss_index(rhs_data)

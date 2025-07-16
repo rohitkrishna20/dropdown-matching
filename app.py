@@ -43,6 +43,7 @@ You are analyzing raw UI text extracted from a sales dashboard built in Figma.
 Your job is to identify the 10 most likely **column headers** in that table.
 
 🎯 Return ONLY a JSON object with keys "header1" through "header10"
+- ❌ Exclude generic labels like “Value”, “Info”, “Details”, or “Stage” — unless part of a known header like "Sales Stage"
 
 Example:
 {{

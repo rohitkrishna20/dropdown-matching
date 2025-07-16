@@ -85,23 +85,17 @@ rhs_data = raw["data"] if "data" in raw else raw
 
 def build_faiss_index(rhs_data: list[dict]):
     all_fields = set()
+
     for row in rhs_data:
         if isinstance(row, dict):
-            all_fields.update(row.keys())
+            all_fields.update(k for k in row.keys() if isinstance(k, str) and k.strip())
 
-    field_names = [field.strip() for field in all_fields if field.strip()]
-    if not field_names:
-        raise ValueError("No field names found in right-hand data.")
+    if not all_fields:
+        raise ValueError("❌ No field names found in right-hand data.")
 
-    docs = [Document(page_content=field) for field in field_names]
-
+    docs = [Document(page_content=field) for field in all_fields]
     embeddings = OllamaEmbeddings(model="llama3.2")
-    try:
-        vectorstore = FAISS.from_documents(docs, embeddings)
-    except Exception as e:
-        raise RuntimeError(f"FAISS index creation failed: {str(e)}")
-
-    return vectorstore
+    return FAISS.from_documents(docs, embeddings)
 faiss_index = build_faiss_index(rhs_data)
 
 @app.post("/api/match_fields")

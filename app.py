@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from pathlib import Path
 import json, re, ollama
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain.text_splitter import CharacterTextSplitter

@@ -4,12 +4,11 @@ import json, re
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain.text_splitter import CharacterTextSplitter
 import ollama
 
 app = Flask(__name__)
 
-# ───────────── Load Figma UI JSON (Left-hand side) ─────────────
+# ───────────── Load Figma UI JSON ─────────────
 lhs_path = Path("data/FigmaLeftHS.json")
 lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
@@ -33,7 +32,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # preserve order, no duplicates
+    return list(dict.fromkeys(out))  # remove duplicates, preserve order
 
 ui_text = extract_figma_text(lhs_data)
 
@@ -42,14 +41,14 @@ def make_prompt(labels: list[str]) -> str:
     return f"""
 You are analyzing raw UI text from a sales dashboard built in Figma. Extract the **10 best column headers** from this text.
 
-Follow these strict rules:
+Strict rules:
 - ✅ Must be structured field names used to label columns
 - ✅ Must be unique
 - ❌ Never include "Status", "Date", or "Value"
-- ❌ Exclude generic or vague labels, pipeline stages, or alert messages
+- ❌ Exclude generic/vague labels, pipeline stages, alert messages
 - ❌ Exclude values like “Web”, “E-Mail”, “Due to closure”
 
-Return only:
+Return JSON only:
 {{
   "header1": "...",
   "header2": "...",
@@ -78,7 +77,7 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ───────────── LangChain Matching Logic ─────────────
+# ───────────── Load Right-Hand Side JSON ─────────────
 rhs_path = Path("data/DataRightHS.json")
 raw = json.loads(rhs_path.read_text(encoding="utf-8"))
 rhs_data = raw["data"] if "data" in raw else raw

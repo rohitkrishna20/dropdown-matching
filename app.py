@@ -68,16 +68,22 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
+
+        # Extract headers from model response
         headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        # Extract up to 10 valid (non-empty) headers
-        headers = [h.strip() for h in headers if h.strip()]
-        output = {f"header{i+1}": headers[i] for i in range(len(headers))}
+        headers = [h.strip() for h in headers if h.strip()]  # Remove blanks
 
-        # Fill remaining headers (if fewer than 10) with empty strings
-        for i in range(len(headers), 10):
-            output[f"header{i+1}"] = ""
+        # Remove duplicates while preserving order
+        seen = set()
+        headers = [h for h in headers if h.lower() not in seen and not seen.add(h.lower())]
 
+        # Keep only the first 10 valid headers
+        headers = headers[:10]
+
+        # Build output JSON
+        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
         return jsonify(output)
+
     except Exception as e:
         return jsonify({
             "error": "Header extraction failed",
@@ -85,11 +91,12 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
+
 # ──────── Load Right-hand Data JSON (DataRightHS.json) ────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))
 
-# Unwrap nested "items" key if present
+# Unwrap nested "data" key if present
 rhs_data = raw_rhs.get("items") if isinstance(raw_rhs, dict) and "items" in raw_rhs else raw_rhs
 
 def build_faiss_index(rhs_data: list[dict]):

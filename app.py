@@ -86,25 +86,40 @@ Raw UI text:
 """.strip()
 
 @app.get("/api/top10")
+@app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
     try:
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
 
-        # Extract headers from model response
-        headers = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-        headers = [h.strip() for h in headers if h.strip()]  # Remove blanks
+        # Try to parse valid JSON block
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            # fallback to regex if JSON fails
+            parsed = {}
+            matches = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
+            for i, h in enumerate(matches[:10]):
+                parsed[f"header{i+1}"] = h.strip()
 
-        # Remove duplicates while preserving order
+        # Remove empty or duplicate headers
         seen = set()
-        headers = [h for h in headers if h.lower() not in seen and not seen.add(h.lower())]
+        output = {}
+        i = 1
+        for key in sorted(parsed.keys()):
+            val = parsed[key].strip()
+            if val and val.lower() not in seen:
+                seen.add(val.lower())
+                output[f"header{i}"] = val
+                i += 1
+                if i > 10:
+                    break
 
-        # Keep only the first 10 valid headers
-        headers = headers[:10]
+        # Fill in blanks if less than 10
+        for j in range(i, 11):
+            output[f"header{j}"] = ""
 
-        # Build output JSON
-        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
         return jsonify(output)
 
     except Exception as e:

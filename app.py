@@ -88,10 +88,19 @@ def build_faiss_index(rhs_data: list[dict]):
         if isinstance(row, dict):
             all_fields.update(row.keys())
 
-    docs = [Document(page_content=field) for field in all_fields if field.strip()]
-    embeddings = OllamaEmbeddings(model="llama3.2")
-    return FAISS.from_documents(docs, embeddings)
+    field_names = [field.strip() for field in all_fields if field.strip()]
+    if not field_names:
+        raise ValueError("No field names found in right-hand data.")
 
+    docs = [Document(page_content=field) for field in field_names]
+
+    embeddings = OllamaEmbeddings(model="llama3.2")
+    try:
+        vectorstore = FAISS.from_documents(docs, embeddings)
+    except Exception as e:
+        raise RuntimeError(f"FAISS index creation failed: {str(e)}")
+
+    return vectorstore
 faiss_index = build_faiss_index(rhs_data)
 
 @app.post("/api/match_fields")

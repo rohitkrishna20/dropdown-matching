@@ -82,6 +82,8 @@ def api_top10():
 rhs_path = Path("data/DataRightHS.json")
 rhs_data = json.loads(rhs_path.read_text(encoding="utf-8"))
 
+print("RHS Length:", len(rhs_data))
+print("RHS first item:", rhs_data[0] if rhs_data else "EMPTY")
 def build_faiss_index(rhs_data: list[dict]):
     all_fields = set()
     for row in rhs_data:

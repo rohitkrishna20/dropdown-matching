@@ -74,39 +74,28 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
+        print("---- Ollama Raw Response ----")
+        print(raw)
 
-        # Try to parse valid JSON block
+        # Try JSON parsing
+        parsed = {}
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            # fallback to regex if JSON fails
-            parsed = {}
-            matches = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-            for i, h in enumerate(matches[:10]):
-                parsed[f"header{i+1}"] = h.strip()
+            # Try to extract dict body manually if wrapped in explanation
+            json_block = re.search(r"\{[\s\S]*?\}", raw)
+            if json_block:
+                parsed = json.loads(json_block.group())
 
-        # Remove empty or duplicate headers
-        seen = set()
-        output = {}
-        i = 1
-        for key in sorted(parsed.keys()):
-            val = parsed[key].strip()
-            if val and val.lower() not in seen:
-                seen.add(val.lower())
-                output[f"header{i}"] = val
-                i += 1
-                if i > 10:
-                    break
+        # Convert keys to header1, header2, ...
+        headers = list(parsed.keys())
+        clean = [h.strip() for h in headers if h.strip()]
 
-        # Fill in blanks if less than 10
-        for j in range(i, 11):
-            output[f"header{j}"] = ""
+        output = {f"header{i+1}": clean[i] for i in range(min(10, len(clean)))}
+        for i in range(len(clean), 10):
+            output[f"header{i+1}"] = ""
 
-        # Make sure Postman sees valid JSON response
-        response = jsonify(output)
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Content-Type', 'application/json')
-        return response
+        return jsonify(output)
 
     except Exception as e:
         return jsonify({

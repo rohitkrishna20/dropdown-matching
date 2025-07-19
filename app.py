@@ -46,7 +46,7 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - vague terms (“Date”, “Value”, “Info”, “Details”, “Time”)
 - repeated labels
 - empty strings
-- data values (like “Web”, “Direct Mail”, “Email”)
+- data values that contain any sort of relation to "mail"
 - company names (like “Edge Consulting” or “Health Group”)
 - pipeline stages (“Negotiation”, “Discovery”)
 - anything that includes the word “status”

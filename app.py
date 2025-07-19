@@ -50,10 +50,21 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - company names (like “Edge Consulting” or “Health Group”)
 - pipeline stages (“Negotiation”, “Discovery”)
 - anything that includes the word “status”
+- ❌ Data values within the rows
+- ❌ Status phrases, alerts, or labels like “At Risk”, “Due to closure”
+- ❌ Names of companies or customers
+- ❌ Words like “Info”, “Details”, “Value”, “Group”, “Solution”
+- ❌ Activity counts or dashboard widgets (e.g. “My To-do’s”, “My Quotes”)
+- ❌ Any duplicate or empty entries
 
 ✅ DO INCLUDE:
 - field names that appear once near the top of a table
 - typical column headers like “Name”, “Owner”, “Created”, “Sales Stage”
+- UI terms that appear once per column in a table
+- Actual table header labels (top row of a column)
+- Compact, specific, and meaningful labels
+
+
 
 Return a JSON like this:
 {{

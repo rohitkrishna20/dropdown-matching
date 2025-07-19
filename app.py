@@ -74,17 +74,18 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
-        print("\n---- Ollama Raw Response ----")
-        print(raw)
-        print("-----------------------------\n")
 
+        # Try to parse valid JSON block
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
+            # fallback to regex if JSON fails
+            parsed = {}
             matches = re.findall(r'"header\d+"\s*:\s*"([^"]+)"', raw)
-            parsed = {f"header{i+1}": val.strip() for i, val in enumerate(matches)}
+            for i, h in enumerate(matches[:10]):
+                parsed[f"header{i+1}"] = h.strip()
 
-        # Filter empty + duplicates
+        # Remove empty or duplicate headers
         seen = set()
         output = {}
         i = 1
@@ -97,11 +98,15 @@ def api_top10():
                 if i > 10:
                     break
 
-        # Fill empty slots with ""
+        # Fill in blanks if less than 10
         for j in range(i, 11):
             output[f"header{j}"] = ""
 
-        return jsonify(output)
+        # Make sure Postman sees valid JSON response
+        response = jsonify(output)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Content-Type', 'application/json')
+        return response
 
     except Exception as e:
         return jsonify({
@@ -109,7 +114,6 @@ def api_top10():
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
-
 # ─────────── Load RHS JSON ───────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))

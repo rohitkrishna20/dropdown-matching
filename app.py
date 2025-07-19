@@ -56,12 +56,20 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - ❌ Words like “Info”, “Details”, “Value”, “Group”, “Solution”
 - ❌ Activity counts or dashboard widgets (e.g. “My To-do’s”, “My Quotes”)
 - ❌ Any duplicate or empty entries
+- Specific row values (e.g., “Qualify”, “Web”, “Titan Edge”)
+- Alerts or status indicators (e.g., “At Risk”, “Due to closure”)
+- UI actions or sections (e.g., “My To-Do’s”, “View All”)
+
 
 ✅ DO INCLUDE:
 - field names that appear once near the top of a table
 - typical column headers like “Name”, “Owner”, “Created”, “Sales Stage”
 - UI terms that appear once per column in a table
-- Actual table header labels (top row of a column)
+- Only field/category labels that describe a column
+- Words that appear once per column and represent structured data types
+- Labels likely to be in a table’s top row
+
+
 - Compact, specific, and meaningful labels
 
 

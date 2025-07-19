@@ -74,6 +74,9 @@ def api_top10():
     try:
         resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw = resp["message"]["content"]
+        print("\n---- Ollama Raw Response ----")
+print(raw)
+print("-----------------------------\n")
 
         try:
             parsed = json.loads(raw)

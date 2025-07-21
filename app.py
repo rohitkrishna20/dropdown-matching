@@ -13,6 +13,17 @@ lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
+    
+    def is_likely_header(txt: str) -> bool:
+        # Exclude values with special characters, numbers, or too long
+        return (
+            txt
+            and txt[0].isupper()
+            and len(txt.split()) <= 3
+            and re.match(r'^[A-Z][a-z]+(?: [A-Z][a-z]+)*$', txt)
+            and not any(c in txt for c in "-@%/:()[]0123456789")
+        )
+
 
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -39,42 +50,26 @@ ui_text = extract_figma_text(lhs_data)
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
+You are an expert in user interface parsing.
 
-❌ DO NOT include:
-- status fields (like “Status”, “At Risk”, “Status Indicators”)
-- vague terms (“Date”, “Value”, “Info”, “Details”, “Time”)
-- repeated labels
-- empty strings
-- data values that contain any sort of relation to "mail"
-- company names (like “Edge Consulting” or “Health Group”)
-- pipeline stages (“Negotiation”, “Discovery”)
-- anything that includes the word “status”
-- ❌ Data values within the rows
-- ❌ Status phrases like “At Risk”, “Due to closure”
-- ❌ Names of companies or customers
-- ❌ Words like “Info”, “Details”, “Value”, “Group”, “Solution”
-- ❌ Activity counts or dashboard widgets (e.g. “My To-do’s”, “My Quotes”)
-- ❌ Any duplicate or empty entries
-- Specific row values (e.g., “Qualify”, “Web”, “Titan Edge”)
-- Alerts or status indicators (e.g., “At Risk”, “Due to closure”)
-- UI actions or sections (e.g., “My To-Do’s”, “View All”)
+You have received raw UI text from a **Figma-based sales dashboard**. Your task is to extract the **10 most likely column headers** that label structured fields in a data table.
 
+🧠 Column headers are short, capitalized field names at the **top of a table**. They describe what kind of data appears in each row (like account name, sales stage, score, dates, etc.).
 
-✅ DO INCLUDE:
-- field names that appear once near the top of a table
-- typical column headers like “Name”, “Owner”, “Created”, “Sales Stage”
-- UI terms that appear once per column in a table
-- Only field/category labels that describe a column
-- Words that appear once per column and represent structured data types
-- Labels likely to be in a table’s top row
+❌ Do NOT include:
+- Values or data entries (like “Negotiation”, “Web”, “Closed”, “MPLS”, or “Titan Edge”)
+- Anything containing special characters like dashes, colons, slashes, or numbers
+- Business names, company references, or long compound names
+- Terms with lowercase-only letters, ALL CAPS, or generic labels like “Info”, “Details”, “Value”
+- Duplicate entries or headers containing “status”, “indicator”, or “alert”
 
+✅ DO include:
+- Only short, capitalized, clean terms (1–3 words max)
+- Labels that likely appear as the **top row in a data table**
+- Unique, structured field names that describe each column
 
-- Compact, specific, and meaningful labels
+Return exactly 10 column headers in this strict JSON format:
 
-
-
-Return a JSON like this:
 {{
   "header1": "...",
   "header2": "...",

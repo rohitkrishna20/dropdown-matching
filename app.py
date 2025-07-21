@@ -62,17 +62,17 @@ Follow these strict rules:
 - Is not repeated or ambiguous
 
 🚫 Exclude anything that:
-- Is a **navigation item** (like “Leads”, “Quotes”, “Opportunities”, “Dashboard”)
-- Is a **section label** (like “Activities”, “Tasks”, “Accounts”)
-- Is a **process step** (like “Qualify”, “Discovery”, “Negotiate”)
-- Refers to a **pipeline status**, **team role**, or **stage** (like “Primary”, “At Risk”, “Owner”)
-- Is a **verb** or action word
-- Appears more than once
-- Contains **special characters**, emojis, or symbols
-- Is vague (like “Info”, “Value”, “Time”)
+- Is a navigation item (like “Leads”, “Quotes”, “Opportunities”, “Dashboard”)
+- Is a section label (like “Activities”, “Tasks”, “Accounts”)
+- Refers to a pipeline status (e.g., “Primary”, “At Risk”, “Open Opportunities”)
+- Is a process step (like “Qualify”, “Discovery”, “Negotiate”, “Sales Visit”)
+- Includes words like “Open”, “Risk”, “Due”, or “Visit” — these indicate statuses or timing
+- Ends in “Stage”, “Type”, “Step”, “Phase”, “Opportunities”, or “to Closure”
+- Combines verbs with nouns (e.g., “Due to Closure”, “At Risk”, “Sales Visit”)
 - Is longer than 3 words
-- Ends in **Stage**, **Type**, **Step**, or **Phase**
-
+- Appears more than once
+- Contains special characters, emojis, or symbols
+- Is vague (like “Value”, “Date”, “Time”, “Info”)
 
 📌 Additional guidance:
 📌 Additional filters:

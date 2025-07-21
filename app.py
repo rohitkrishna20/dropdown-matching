@@ -63,7 +63,17 @@ You have received raw UI text from a **Figma-based sales dashboard**. Your task 
 - Terms with lowercase-only letters, ALL CAPS, or generic labels like “Info”, “Details”, “Value”
 - Duplicate entries or headers containing “status”, “indicator”, or “alert”
 
+- ❌ Do NOT include rows that represent navigation, sales stages, company names, or alert phrases
+- ❌ NEVER include vague or short terms like "Value", "Primary", "Web", or "Open Leads"
+- ❌ DO NOT include full objects like "Quotes", "Activities", or "Leads" — these are not column headers
+- ❌ EXCLUDE any header that appears to be:
+    - A company name (e.g., anything ending in Group, Solutions, Health, Consulting)
+    - A pipeline stage (e.g., Qualify, Discovery, Negotiation)
+    - A view title (e.g., My Quotes, Open Activities)
+
 ✅ DO include:
+- ✅ Only select structured **column headers** used to label fields in a sales table (e.g., name, score, amount, source, probability)
+- ✅ Prefer field names that describe attributes or metadata of each opportunity (e.g. "Name", "Sales Stage", "Win Probability")
 - Only short, capitalized, clean terms (1–3 words max)
 - Labels that likely appear as the **top row in a data table**
 - Unique, structured field names that describe each column

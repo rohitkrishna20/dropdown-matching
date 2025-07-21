@@ -63,11 +63,20 @@ Follow these strict rules:
 - Does not contain special characters (%, /, @, (), etc.)
 - Is not repeated or ambiguous
 
-📌 Additional guidance:
-- Prioritize headers that appear above row-style values (like scores, dates, money, percentages)
-- Ignore text that's clearly part of dropdowns, links, action buttons, or sidebar sections
-- Prefer terms that describe **opportunity-specific metrics or statuses**
+Exclude any terms that:
+- Appear **inside** table cells as data values rather than **above** the columns
+- Describe **sales process stages**, **user actions**, or **internal statuses**
+- Are likely **step names**, such as "Qualify", "Negotiate", "Discovery", or "Sales Visit Type"
+- Are **verbs** or process actions rather than data attributes
+- Appear more than once across multiple locations in the UI
+- Are **longer than 3 words** or contain repeated keywords (e.g., “Visit Type”)
 
+📌 Additional guidance:
+📌 Additional filters:
+- Do not include items that look like sales process steps (e.g. verbs or labels like “Qualify”, “Negotiate”, “Discovery”)
+- Avoid phrases that contain the word “Stage”, “Type”, “Step”, or “Phase”
+- Exclude anything longer than 3 words or repeated throughout the UI
+- Prefer items shown in the **header row** directly above numeric or text data in rows
 Return only the 10 best candidates in **strict JSON format** like this (and nothing else):
 
 {{
@@ -88,7 +97,6 @@ Raw UI text:
 """.strip()
 
 # ─────────── /api/top10 ───────────
-# ─────────── /api/top10 ───────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -100,13 +108,13 @@ def api_top10():
 
         # Try JSON parsing
         parsed = {}
-        try:
-            raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
-            parsed = json.loads(raw_clean)
-        except json.JSONDecodeError:
-            json_block = re.search(r"\{[\s\S]*?\}", raw)
-            if json_block:
-                parsed = json.loads(json_block.group())
+try:
+    raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
+    parsed = json.loads(raw_clean)
+except json.JSONDecodeError:
+    json_block = re.search(r"\{[\s\S]*?\}", raw)
+    if json_block:
+        parsed = json.loads(json_block.group())
 
         # Convert keys to header1, header2, ...
         headers = list(parsed.keys())
@@ -124,7 +132,6 @@ def api_top10():
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
-
 # ─────────── Load RHS JSON ───────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))

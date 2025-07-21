@@ -47,26 +47,29 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 ui_text = extract_figma_text(lhs_data)
 
 # ─────────── Prompt Template ───────────
-def make_prompt(labels: list[str]) -> str:
-    blob = "\n".join(f"- {t}" for t in labels)
+def make_prompt(figma_text):
     return f"""
-def make_prompt_for_headers(figma_text):
-    return f"""
-You are analyzing UI text extracted from a Figma design file for a Sales dashboard table. Your task is to identify the **10 most likely column headers** shown in a **data table** within the UI. Focus only on items that:
-- Are concise, capitalized, and descriptive
-- Represent unique opportunity-related attributes (e.g., 'AI Score', 'Expected Closure')
-- Are **not** vague (like 'Value', 'Time', 'Info')
-- Are **not** navigation elements (like 'Leads', 'Quotes', 'Opportunities')
-- Are **not** generic data values (like 'Email', 'Web', 'Direct mail')
-- Are **not** pipeline statuses (like 'Open Leads', 'Primary', 'At Risk')
-- Are **not** full objects (like 'Activities', 'Quotations')
+You are an expert UI parser. You are given raw UI text extracted from a Figma design file for a sales dashboard. Your task is to extract exactly **10 column headers** that are part of a **data table** showing opportunity-level information.
 
-Return only 10 column headers **exactly** as they appear in the UI. Do not fabricate or generalize. Do not add explanation.
+Follow these strict rules:
 
-Here is the raw text extracted from the Figma UI:
-{figma_text}
+✅ **Include a header only if it:**
+- Is short (1–3 words), title-cased, and clearly descriptive
+- Represents a concrete data attribute in a row (like “Win Probability”, “AI Score”, “Expected Closure”)
+- Is not vague (e.g. “Value”, “Date”, “Info”, “Time”)
+- Is not a navigation or section label (e.g. “Leads”, “Quotes”, “Activities”, “Dashboard”)
+- Is not a company name, user name, or pipeline label (e.g. “Primary”, “Open Leads”)
+- Is not a generic data value (e.g. “Email”, “Web”, “Direct Mail”)
+- Does not contain special characters (%, /, @, (), etc.)
+- Is not repeated or ambiguous
 
-Respond in this strict JSON format only:
+📌 Additional guidance:
+- Prioritize headers that appear above row-style values (like scores, dates, money, percentages)
+- Ignore text that's clearly part of dropdowns, links, action buttons, or sidebar sections
+- Prefer terms that describe **opportunity-specific metrics or statuses**
+
+Return only the 10 best candidates in **strict JSON format** like this (and nothing else):
+
 {{
   "header1": "...",
   "header2": "...",
@@ -79,9 +82,9 @@ Respond in this strict JSON format only:
   "header9": "...",
   "header10": "..."
 }}
-"""
+
 Raw UI text:
-{blob}
+{figma_text}
 """.strip()
 
 # ─────────── /api/top10 ───────────

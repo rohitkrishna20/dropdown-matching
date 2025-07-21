@@ -82,6 +82,11 @@ Follow these strict rules:
 - Prefer items shown in the **header row** directly above numeric or text data in rows
 Return only the 10 best candidates in **strict JSON format** like this (and nothing else):
 
+
+Double-check your output and remove:
+- Any sales process terms (e.g., "Qualify", "Sales Visit", "Discovery", "At Risk")
+- Anything that looks like a pipeline status (e.g., "Open Opportunities", "Due to Closure")
+- Generic alerts or vague terms (e.g., "Alerts", "Info", "Value")
 {{
   "header1": "...",
   "header2": "...",

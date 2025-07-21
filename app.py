@@ -88,6 +88,7 @@ Raw UI text:
 """.strip()
 
 # ─────────── /api/top10 ───────────
+# ─────────── /api/top10 ───────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -99,13 +100,13 @@ def api_top10():
 
         # Try JSON parsing
         parsed = {}
-try:
-    raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
-    parsed = json.loads(raw_clean)
-except json.JSONDecodeError:
-    json_block = re.search(r"\{[\s\S]*?\}", raw)
-    if json_block:
-        parsed = json.loads(json_block.group())
+        try:
+            raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
+            parsed = json.loads(raw_clean)
+        except json.JSONDecodeError:
+            json_block = re.search(r"\{[\s\S]*?\}", raw)
+            if json_block:
+                parsed = json.loads(json_block.group())
 
         # Convert keys to header1, header2, ...
         headers = list(parsed.keys())
@@ -123,6 +124,7 @@ except json.JSONDecodeError:
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
+
 # ─────────── Load RHS JSON ───────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))

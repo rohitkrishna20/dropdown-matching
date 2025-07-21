@@ -1,9 +1,13 @@
 from flask import Flask, request, jsonify
 from pathlib import Path
-import json, re, ollama
-from langchain_ollama import OllamaEmbeddings
+import json, re, os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+from dotenv import load_dotenv
+
+# Load environment variables if using .env
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -13,15 +17,6 @@ lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
-
-    def is_likely_header(txt: str) -> bool:
-        return (
-            txt
-            and txt[0].isupper()
-            and len(txt.split()) <= 3
-            and re.match(r'^[A-Z][a-z]+(?: [A-Z][a-z]+)*$', txt)
-            and not any(c in txt for c in "-@%/:()[]0123456789")
-        )
 
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -49,44 +44,18 @@ def make_prompt(figma_text):
     return f"""
 You are an expert UI parser. You are given raw UI text extracted from a Figma design file for a sales dashboard. Your task is to extract exactly **10 column headers** that are part of a **data table** showing opportunity-level information.
 
-Follow these strict rules:
+✅ Include only if:
+- Short (1–3 words), title-cased, clearly descriptive
+- Represents a concrete data attribute like “Win Probability”, “AI Score”, “Expected Closure”
+- Not vague (e.g., “Value”, “Date”, “Info”, “Time”)
+- Not navigation or section labels (“Leads”, “Quotes”, “Activities”, “Dashboard”)
+- Not company/user names or pipeline labels (“Primary”, “Open Leads”)
+- Not generic data values (“Email”, “Web”, “Direct Mail”)
+- Not process verbs/steps (“Qualify”, “Negotiate”, “Sales Visit”)
+- Not longer than 3 words or duplicated
+- Not status terms like “Due to Closure”, “At Risk”
 
-✅ **Include a header only if it:**
-- Is short (1–3 words), title-cased, and clearly descriptive
-- Represents a concrete data attribute in a row (like “Win Probability”, “AI Score”, “Expected Closure”)
-- Is not vague (e.g. “Value”, “Date”, “Info”, “Time”)
-- Is not a navigation or section label (e.g. “Leads”, “Quotes”, “Activities”, “Dashboard”)
-- Is not a company name, user name, or pipeline label (e.g. “Primary”, “Open Leads”)
-- Is not a generic data value (e.g. “Email”, “Web”, “Direct Mail”)
-- Does not contain special characters (%, /, @, (), etc.)
-- Is not repeated or ambiguous
-
-🚫 Exclude anything that:
-- Is a navigation item (like “Leads”, “Quotes”, “Opportunities”, “Dashboard”)
-- Is a section label (like “Activities”, “Tasks”, “Accounts”)
-- Refers to a pipeline status (e.g., “Primary”, “At Risk”, “Open Opportunities”)
-- Is a process step (like “Qualify”, “Discovery”, “Negotiate”, “Sales Visit”)
-- Includes words like “Open”, “Risk”, “Due”, or “Visit” — these indicate statuses or timing
-- Ends in “Stage”, “Type”, “Step”, “Phase”, “Opportunities”, or “to Closure”
-- Combines verbs with nouns (e.g., “Due to Closure”, “At Risk”, “Sales Visit”)
-- Is longer than 3 words
-- Appears more than once
-- Contains special characters, emojis, or symbols
-- Is vague (like “Value”, “Date”, “Time”, “Info”)
-
-📌 Additional guidance:
-📌 Additional filters:
-- Do not include items that look like sales process steps (e.g. verbs or labels like “Qualify”, “Negotiate”, “Discovery”)
-- Avoid phrases that contain the word “Stage”, “Type”, “Step”, or “Phase”
-- Exclude anything longer than 3 words or repeated throughout the UI
-- Prefer items shown in the **header row** directly above numeric or text data in rows
-Return only the 10 best candidates in **strict JSON format** like this (and nothing else):
-
-
-Double-check your output and remove:
-- Any sales process terms (e.g., "Qualify", "Sales Visit", "Discovery", "At Risk")
-- Anything that looks like a pipeline status (e.g., "Open Opportunities", "Due to Closure")
-- Generic alerts or vague terms (e.g., "Alerts", "Info", "Value")
+📌 Return JSON only like this (no explanation):
 {{
   "header1": "...",
   "header2": "...",
@@ -107,11 +76,12 @@ Raw UI text:
 # ─────────── /api/top10 ───────────
 @app.get("/api/top10")
 def api_top10():
-    prompt = make_prompt(ui_text)
     try:
-        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        raw = resp["message"]["content"]
-        print("---- Ollama Raw Response ----")
+        prompt = make_prompt("\n".join(f"- {t}" for t in ui_text))
+        llm = ChatOpenAI(model="gpt-4-turbo", temperature=0)
+        response = llm.invoke(prompt)
+        raw = response.content
+        print("---- GPT-4 Response ----")
         print(raw)
 
         parsed = {}
@@ -123,19 +93,16 @@ def api_top10():
             if json_block:
                 parsed = json.loads(json_block.group())
 
-        headers = list(parsed.keys())
-        clean = [h.strip() for h in headers if h.strip()]
-        output = {f"header{i+1}": clean[i] for i in range(min(10, len(clean)))}
-        for i in range(len(clean), 10):
-            output[f"header{i+1}"] = ""
-
+        headers = list(parsed.values())
+        headers = [h.strip() for h in headers if h.strip()]
+        output = {f"header{i+1}": headers[i] if i < len(headers) else "" for i in range(10)}
         return jsonify(output)
 
     except Exception as e:
         return jsonify({
             "error": "Header extraction failed",
             "details": str(e),
-            "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
+            "raw_response": raw if 'raw' in locals() else "no response"
         }), 500
 
 # ─────────── Load RHS JSON ───────────
@@ -152,7 +119,7 @@ def build_faiss_index(rhs_data: list[dict]):
                 if k and isinstance(k, str):
                     fields.add(k.strip())
     docs = [Document(page_content=field) for field in fields]
-    return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
+    return FAISS.from_documents(docs, OpenAIEmbeddings())
 
 faiss_index = build_faiss_index(rhs_data)
 
@@ -180,5 +147,5 @@ def home():
     return jsonify({"message": "Use /api/top10 or /api/match_fields"})
 
 if __name__ == "__main__":
-    print("✅ Running LangChain + FAISS + Ollama Matching App")
+    print("✅ Running LangChain + FAISS + OpenAI Matching App")
     app.run(debug=True)

@@ -61,13 +61,18 @@ Follow these strict rules:
 - Does not contain special characters (%, /, @, (), etc.)
 - Is not repeated or ambiguous
 
-Exclude any terms that:
-- Appear **inside** table cells as data values rather than **above** the columns
-- Describe **sales process stages**, **user actions**, or **internal statuses**
-- Are likely **step names**, such as "Qualify", "Negotiate", "Discovery", or "Sales Visit Type"
-- Are **verbs** or process actions rather than data attributes
-- Appear more than once across multiple locations in the UI
-- Are **longer than 3 words** or contain repeated keywords (e.g., “Visit Type”)
+🚫 Exclude anything that:
+- Is a **navigation item** (like “Leads”, “Quotes”, “Opportunities”, “Dashboard”)
+- Is a **section label** (like “Activities”, “Tasks”, “Accounts”)
+- Is a **process step** (like “Qualify”, “Discovery”, “Negotiate”)
+- Refers to a **pipeline status**, **team role**, or **stage** (like “Primary”, “At Risk”, “Owner”)
+- Is a **verb** or action word
+- Appears more than once
+- Contains **special characters**, emojis, or symbols
+- Is vague (like “Info”, “Value”, “Time”)
+- Is longer than 3 words
+- Ends in **Stage**, **Type**, **Step**, or **Phase**
+
 
 📌 Additional guidance:
 📌 Additional filters:

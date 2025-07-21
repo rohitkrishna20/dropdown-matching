@@ -13,9 +13,8 @@ lhs_data = json.loads(lhs_path.read_text(encoding="utf-8"))
 
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
-    
+
     def is_likely_header(txt: str) -> bool:
-        # Exclude values with special characters, numbers, or too long
         return (
             txt
             and txt[0].isupper()
@@ -23,7 +22,6 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             and re.match(r'^[A-Z][a-z]+(?: [A-Z][a-z]+)*$', txt)
             and not any(c in txt for c in "-@%/:()[]0123456789")
         )
-
 
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -42,7 +40,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # preserve order, remove duplicates
+    return list(dict.fromkeys(out))
 
 ui_text = extract_figma_text(lhs_data)
 
@@ -106,20 +104,17 @@ def api_top10():
         print("---- Ollama Raw Response ----")
         print(raw)
 
-        # Try JSON parsing
         parsed = {}
-try:
-    raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
-    parsed = json.loads(raw_clean)
-except json.JSONDecodeError:
-    json_block = re.search(r"\{[\s\S]*?\}", raw)
-    if json_block:
-        parsed = json.loads(json_block.group())
+        try:
+            raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
+            parsed = json.loads(raw_clean)
+        except json.JSONDecodeError:
+            json_block = re.search(r"\{[\s\S]*?\}", raw)
+            if json_block:
+                parsed = json.loads(json_block.group())
 
-        # Convert keys to header1, header2, ...
         headers = list(parsed.keys())
         clean = [h.strip() for h in headers if h.strip()]
-
         output = {f"header{i+1}": clean[i] for i in range(min(10, len(clean)))}
         for i in range(len(clean), 10):
             output[f"header{i+1}"] = ""
@@ -132,6 +127,7 @@ except json.JSONDecodeError:
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
+
 # ─────────── Load RHS JSON ───────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))

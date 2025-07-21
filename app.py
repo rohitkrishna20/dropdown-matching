@@ -96,13 +96,13 @@ def api_top10():
 
         # Try JSON parsing
         parsed = {}
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Try to extract dict body manually if wrapped in explanation
-            json_block = re.search(r"\{[\s\S]*?\}", raw)
-            if json_block:
-                parsed = json.loads(json_block.group())
+try:
+    raw_clean = raw.replace("“", "\"").replace("”", "\"").strip()
+    parsed = json.loads(raw_clean)
+except json.JSONDecodeError:
+    json_block = re.search(r"\{[\s\S]*?\}", raw)
+    if json_block:
+        parsed = json.loads(json_block.group())
 
         # Convert keys to header1, header2, ...
         headers = list(parsed.keys())

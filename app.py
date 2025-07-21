@@ -50,43 +50,36 @@ ui_text = extract_figma_text(lhs_data)
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
-You are an expert in user interface parsing.
+def make_prompt_for_headers(figma_text):
+    return f"""
+You are analyzing UI text extracted from a Figma design file for a Sales dashboard table. Your task is to identify the **10 most likely column headers** shown in a **data table** within the UI. Focus only on items that:
+- Are concise, capitalized, and descriptive
+- Represent unique opportunity-related attributes (e.g., 'AI Score', 'Expected Closure')
+- Are **not** vague (like 'Value', 'Time', 'Info')
+- Are **not** navigation elements (like 'Leads', 'Quotes', 'Opportunities')
+- Are **not** generic data values (like 'Email', 'Web', 'Direct mail')
+- Are **not** pipeline statuses (like 'Open Leads', 'Primary', 'At Risk')
+- Are **not** full objects (like 'Activities', 'Quotations')
 
-You have received raw UI text from a **Figma-based sales dashboard**. Your task is to extract the **10 most likely column headers** that label structured fields in a data table.
+Return only 10 column headers **exactly** as they appear in the UI. Do not fabricate or generalize. Do not add explanation.
 
-🧠 Column headers are short, capitalized field names at the **top of a table**. They describe what kind of data appears in each row (like account name, sales stage, score, dates, etc.).
+Here is the raw text extracted from the Figma UI:
+{figma_text}
 
-❌ Do NOT include:
-- Values or data entries (like “Negotiation”, “Web”, “Closed”, “MPLS”, or “Titan Edge”)
-- Anything containing special characters like dashes, colons, slashes, or numbers
-- Business names, company references, or long compound names
-- Terms with lowercase-only letters, ALL CAPS, or generic labels like “Info”, “Details”, “Value”
-- Duplicate entries or headers containing “status”, “indicator”, or “alert”
-
-- ❌ Do NOT include rows that represent navigation, sales stages, company names, or alert phrases
-- ❌ NEVER include vague or short terms like "Value", "Primary", "Web", or "Open Leads"
-- ❌ DO NOT include full objects like "Quotes", "Activities", or "Leads" — these are not column headers
-- ❌ EXCLUDE any header that appears to be:
-    - A company name (e.g., anything ending in Group, Solutions, Health, Consulting)
-    - A pipeline stage (e.g., Qualify, Discovery, Negotiation)
-    - A view title (e.g., My Quotes, Open Activities)
-
-✅ DO include:
-- ✅ Only select structured **column headers** used to label fields in a sales table (e.g., name, score, amount, source, probability)
-- ✅ Prefer field names that describe attributes or metadata of each opportunity (e.g. "Name", "Sales Stage", "Win Probability")
-- Only short, capitalized, clean terms (1–3 words max)
-- Labels that likely appear as the **top row in a data table**
-- Unique, structured field names that describe each column
-
-Return exactly 10 column headers in this strict JSON format:
-
+Respond in this strict JSON format only:
 {{
   "header1": "...",
   "header2": "...",
-  ...
+  "header3": "...",
+  "header4": "...",
+  "header5": "...",
+  "header6": "...",
+  "header7": "...",
+  "header8": "...",
+  "header9": "...",
   "header10": "..."
 }}
-
+"""
 Raw UI text:
 {blob}
 """.strip()

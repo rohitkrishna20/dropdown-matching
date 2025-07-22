@@ -42,6 +42,8 @@ def make_prompt(labels: list[str]) -> str:
     return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
+
+
 ❌ DO NOT include:
 - status fields (like “Status”, “At Risk”, “Status Indicators”)
 - vague terms (“Date”, “Value”, “Info”, “Details”, “Time”)
@@ -70,6 +72,17 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Only field/category labels that describe a column
 - Words that appear once per column and represent structured data types
 - Labels likely to be in a table’s top row
+- Capitalized and 1–3 words long
+- Clearly describing a data field or property (e.g. “AI Score”, “Expected Closure”, “Account”)
+- Found once per column at the top of a table
+- Not vague (avoid “Info”, “Value”, “Details”, “Group”, “Solution”)
+- Not status terms (avoid “Status”, “At Risk”, “Due to Closure”)
+- Not company names or business units (e.g. “Edge Consulting”, “Health Group”)
+- Not full sentences or actions (e.g. “Click to Add”, “View All”)
+- Not specific data values (e.g. “Negotiation”, “Titan Edge”, “Web”, “Direct Mail”)
+- Not navigation/menu labels (“Quotes”, “To-Dos”, “Dashboard”)
+- Not duplicated or empty
+
 
 
 - Compact, specific, and meaningful labels

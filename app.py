@@ -15,7 +15,6 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
     def is_likely_header(txt: str) -> bool:
-        # Exclude values with special characters, numbers, or too long
         return (
             txt
             and txt[0].isupper()
@@ -41,10 +40,11 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # de-dupe
+    return list(dict.fromkeys(out))
+
 ui_text = extract_figma_text(lhs_data)
 
-# ──────── Updated Stronger Prompt ────────
+# ──────── Strong Prompt ────────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -79,6 +79,7 @@ Raw UI text:
 {blob}
 """.strip()
 
+# ──────── /api/top10 ────────
 @app.get("/api/top10")
 def api_top10():
     prompt = make_prompt(ui_text)
@@ -97,7 +98,6 @@ def api_top10():
             for i, h in enumerate(matches[:10]):
                 parsed[f"header{i+1}"] = h.strip()
 
-        # Clean up output
         seen = set()
         output = {}
         i = 1
@@ -122,7 +122,7 @@ def api_top10():
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
 
-# ──────── Right-hand Data Matching ────────
+# ──────── RHS Matching ────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))
 rhs_data = raw_rhs.get("items") if isinstance(raw_rhs, dict) and "items" in raw_rhs else raw_rhs

@@ -29,6 +29,8 @@ cd dropdown-matching
        - langchain-community
        - langchain-ollama
        - FAISS CPU
+       - langchain-core
+
 
   3. Install Ollama Locally and Run
      - ollama pull llama3.2
@@ -38,12 +40,17 @@ cd dropdown-matching
      - python app.py and access at http://localhost:5000
     
 ## Using Postman to Test
-
-- match all default headers: http://127.0.0.1:5000/api/match-all (no body required)
-- match one header: https//127.0.0.1:5000/api/match   (body):
+- use method POST - URL: https://localhost:5000/api/find_fields
+- body tab: choose raw - select json as the dropdown
   
-  {
-    "header": "Account"
-  }
+{
+"figma_json": {
+  "path": "data/FigmaleftHS.json"
+},
+"data_json": {
+  "path": "data/DataRightHS.json"
+},
+"data_type": "opportunity" - # can change opportunity to another keyword for matching for a different keyword
+  
 
   

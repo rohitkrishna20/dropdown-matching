@@ -50,7 +50,7 @@ cd dropdown-matching
 "data_json": {
   "path": "data/DataRightHS.json"
 },
-"data_type": "opportunity" - # can change opportunity to another keyword for matching for a different keyword
+"header": "opportunity" - # can change opportunity to another keyword for matching for a different keyword
   
 
   

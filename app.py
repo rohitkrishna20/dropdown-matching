@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from pathlib import Path
 import json, re, ollama
@@ -36,58 +35,33 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 
 ui_text = extract_figma_text(lhs_data)
 
-# ─────────── Prompt Template ───────────
+# ─────────── Prompt Template (NO HARDCODED HEADERS) ───────────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
-
-
 ❌ DO NOT include:
-- status fields (like “Status”, “At Risk”, “Status Indicators”)
-- vague terms (“Date”, “Value”, “Info”, “Details”, “Time”)
-- repeated labels
-- empty strings
-- data values that contain any sort of relation to "mail"
-- company names (like “Edge Consulting” or “Health Group”)
-- pipeline stages (“Negotiation”, “Discovery”)
-- anything that includes the word “status”
-- ❌ Data values within the rows
-- ❌ Status phrases, alerts, or labels like “At Risk”, “Due to closure”
-- ❌ Status phrases like “At Risk”, “Due to closure”
-- ❌ Names of companies or customers
-- ❌ Words like “Info”, “Details”, “Value”, “Group”, “Solution”
-- ❌ Activity counts or dashboard widgets (e.g. “My To-do’s”, “My Quotes”)
-- ❌ Any duplicate or empty entries
-- Specific row values (e.g., “Qualify”, “Web”, “Titan Edge”)
-- Alerts or status indicators (e.g., “At Risk”, “Due to closure”)
-- UI actions or sections (e.g., “My To-Do’s”, “View All”)
-
+- Status fields or indicators
+- Vague terms (like general words for time, value, details, etc.)
+- Repeated labels or empty strings
+- Anything related to email or contact method
+- Company or customer names
+- Process stages or pipeline labels
+- Words that include "status"
+- Data values from inside table rows
+- UI section names, menus, or action buttons
+- Alerts or warnings
+- Dashboard widgets, activity counters
+- Any duplicates or empty entries
 
 ✅ DO INCLUDE:
-- field names that appear once near the top of a table
-- typical column headers like “Name”, “Owner”, “Created”, “Sales Stage”
-- UI terms that appear once per column in a table
-- Only field/category labels that describe a column
-- Words that appear once per column and represent structured data types
-- Labels likely to be in a table’s top row
-- Capitalized and 1–3 words long
-- Clearly describing a data field or property (e.g. “AI Score”, “Expected Closure”, “Account”)
-- Found once per column at the top of a table
-- Not vague (avoid “Info”, “Value”, “Details”, “Group”, “Solution”)
-- Not status terms (avoid “Status”, “At Risk”, “Due to Closure”)
-- Not company names or business units (e.g. “Edge Consulting”, “Health Group”)
-- Not full sentences or actions (e.g. “Click to Add”, “View All”)
-- Not specific data values (e.g. “Negotiation”, “Titan Edge”, “Web”, “Direct Mail”)
-- Not navigation/menu labels (“Quotes”, “To-Dos”, “Dashboard”)
-- Not duplicated or empty
-
-
-
-- Compact, specific, and meaningful labels
-
-
+- Labels that appear once per column in a table
+- Compact and clearly descriptive field names
+- Short phrases (1–3 words)
+- Likely to appear in the top row of a table
+- Structured data field categories (not individual values)
+- Not vague, status-based, or action-based
 
 Return a JSON like this:
 {{
@@ -116,15 +90,12 @@ def api_top10():
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            # Try to extract dict body manually if wrapped in explanation
             json_block = re.search(r"\{[\s\S]*?\}", raw)
             if json_block:
                 parsed = json.loads(json_block.group())
 
-        # Convert keys to header1, header2, ...
         headers = list(parsed.keys())
         clean = [h.strip() for h in headers if h.strip()]
-
         output = {f"header{i+1}": clean[i] for i in range(min(10, len(clean)))}
         for i in range(len(clean), 10):
             output[f"header{i+1}"] = ""
@@ -137,6 +108,7 @@ def api_top10():
             "details": str(e),
             "raw_response": resp["message"]["content"] if 'resp' in locals() else "no response"
         }), 500
+
 # ─────────── Load RHS JSON ───────────
 rhs_path = Path("data/DataRightHS.json")
 raw_rhs = json.loads(rhs_path.read_text(encoding="utf-8"))

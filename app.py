@@ -150,6 +150,65 @@ def api_match_fields():
 def home():
     return jsonify({"message": "Use /api/top10 or /api/match_fields"})
 
+@app.post("/api/find_fields")
+def api_find_fields():
+    try:
+        # Parse input from request
+        data = request.get_json(force=True)
+
+        figma_input = data.get("figma_json", {})
+        rhs_input = data.get("data_json", {})
+
+        # Fallback to default file paths if input isn't provided
+        figma_path = figma_input.get("path", "data/FigmaLeftHS.json")
+        rhs_path = rhs_input.get("path", "data/DataRightHS.json")
+
+        # Load UI text dynamically
+        lhs_data = json.loads(Path(figma_path).read_text(encoding="utf-8"))
+        ui_text = extract_figma_text(lhs_data)
+
+        # Prompt with ALL matching headers (not just top 10)
+        prompt = make_prompt(ui_text)
+        resp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
+        raw = resp["message"]["content"]
+
+        try:
+            parsed = json.loads(raw)
+        except:
+            match = re.search(r"\{[\s\S]*?\}", raw)
+            parsed = json.loads(match.group()) if match else {}
+
+        all_headers = list(parsed.keys())
+
+        # Build FAISS
+        rhs_data = json.loads(Path(rhs_path).read_text(encoding="utf-8"))
+        rhs_items = rhs_data.get("items") if isinstance(rhs_data, dict) and "items" in rhs_data else rhs_data
+        faiss_index = build_faiss_index(rhs_items)
+
+        # Match 1 header at a time from user input
+        target_header = data.get("header")
+        if not target_header:
+            return jsonify({
+                "headers_extracted": all_headers,
+                "message": "Pass a 'header' key to get field matches."
+            })
+
+        results = faiss_index.similarity_search(target_header, k=3)
+        matches = [{"field": r.page_content} for r in results]
+
+        return jsonify({
+            "headers_extracted": all_headers,
+            "top_matches": {
+                target_header: matches
+            }
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": "Find fields failed",
+            "details": str(e)
+        }), 500
+
 if __name__ == "__main__":
     print("✅ Running LangChain + FAISS + Ollama Matching App")
     app.run(debug=True)

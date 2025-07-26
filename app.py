@@ -6,7 +6,7 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────── Text Extraction ───────
+# ───── Text Extraction ─────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -14,7 +14,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
         return cleaned.replace(".", "").isdigit()
 
-    def walk(node: dict):
+    def walk(node):
         if isinstance(node, dict):
             if node.get("type") == "TEXT":
                 txt = node.get("characters", "").strip()
@@ -27,9 +27,9 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # preserve order, de-duplicate
+    return list(dict.fromkeys(out))
 
-# ─────── Prompt for Header Extraction ───────
+# ───── Prompt Engineering ─────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -37,30 +37,21 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 
 ❌ DO NOT include:
 - Status fields or indicators
-- Vague terms (like general words for time, value, details, etc.)
+- Vague terms
 - Repeated labels or empty strings
 - Anything related to email or contact method
 - Company or customer names
 - Process stages or pipeline labels
-- Words that include "status"
-- Data values from inside table rows
-- UI section names, menus, or action buttons
-- Alerts or warnings
-- Dashboard widgets, activity counters
-- Any duplicates or empty entries
+- Alerts, buttons, widgets
 
 ✅ DO INCLUDE:
-- Labels that appear once per column in a table
-- Compact and clearly descriptive field names
-- Short phrases (1–3 words)
-- Likely to appear in the top row of a table
-- Structured data field categories (not individual values)
-- Not vague, status-based, or action-based
+- Column labels from a table
+- Clearly descriptive short phrases
+- Structured field categories (not values)
 
-Return a JSON like this:
+Return JSON:
 {{
   "header1": "...",
-  "header2": "...",
   ...
   "header10": "..."
 }}
@@ -69,7 +60,7 @@ Raw UI text:
 {blob}
 """.strip()
 
-# ─────── FAISS Index Builder ───────
+# ───── FAISS Index Builder ─────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
@@ -80,39 +71,42 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Main Endpoint ───────
+# ───── API Endpoint ─────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
         data = request.get_json(force=True)
 
-        figma_raw_str = data.get("figma_json")
-        data_raw_str = data.get("data_json")
+        # These are raw strings inside nested dicts
+        figma_str = data.get("figma_json")
+        data_str = data.get("data_json")
 
-        if not figma_raw_str or not data_raw_str:
-            return jsonify({"error": "Both figma_json and data_json strings are required"}), 400
+        if not isinstance(figma_str, str) or not isinstance(data_str, str):
+            return jsonify({"error": "figma_json and data_json must be stringified JSON"}), 400
 
-        # Step 1: Parse the input strings to real JSON
-        figma_json = json.loads(figma_raw_str)
-        data_json = json.loads(data_raw_str)
-        rhs_items = data_json.get("items") if isinstance(data_json, dict) and "items" in data_json else data_json
+        # Convert raw strings to real JSON
+        figma_json = json.loads(figma_str)
+        data_json = json.loads(data_str)
 
-        # Step 2: Extract headers from Figma
+        # Step 1: Extract Figma headers
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        raw = response["message"]["content"]
+        raw_output = response["message"]["content"]
 
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw_output)
         except:
-            match = re.search(r"\{[\s\S]*?\}", raw)
+            match = re.search(r"\{[\s\S]*?\}", raw_output)
             parsed = json.loads(match.group()) if match else {}
 
         headers = list(parsed.keys())
 
-        # Step 3: Build FAISS and Match
+        # Step 2: Build FAISS from data_json
+        rhs_items = data_json.get("items") if isinstance(data_json, dict) and "items" in data_json else data_json
         index = build_faiss_index(rhs_items)
+
+        # Step 3: Match top 5 per header
         matches = {}
         for header in headers:
             results = index.similarity_search(header, k=5)
@@ -128,8 +122,7 @@ def api_find_fields():
 
 @app.get("/")
 def home():
-    return jsonify({"message": "POST to /api/find_fields with figma_json and data_json (as raw JSON strings)"})
+    return jsonify({"message": "POST to /api/find_fields with figma_json and data_json as stringified JSON strings inside wrapper"})
 
 if __name__ == "__main__":
-    print("✅ API Running on /api/find_fields")
     app.run(debug=True)

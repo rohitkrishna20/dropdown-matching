@@ -29,7 +29,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     walk(figma_json)
     return list(dict.fromkeys(out))  # de-dupe, preserve order
 
-# ─────── Header Extraction Prompt ───────
+# ─────── Prompt to extract headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -67,7 +67,7 @@ Raw UI text:
 {blob}
 """.strip()
 
-# ─────── Build FAISS index from dataset fields ───────
+# ─────── Build FAISS index from data schema ───────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
@@ -78,50 +78,45 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Main endpoint ───────
+# ─────── API Endpoint ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
-        data = request.get_json(force=True)
-
-        figma_str = data.get("figma_json")
-        data_str = data.get("data_json")
+        body = request.get_json(force=True)
+        figma_str = body.get("figma_json")
+        data_str = body.get("data_json")
 
         if not isinstance(figma_str, str) or not isinstance(data_str, str):
             return jsonify({"error": "figma_json and data_json must be stringified JSON"}), 400
 
-        while isinstance(figma_str, str):
-            try:
-                figma_str = json.loads(figma_str)
-            except:
-                break
-        figma_json = figma_str
+        # Load stringified JSON strings (recursive decode)
+        def decode_json_recursively(raw_str):
+            while isinstance(raw_str, str):
+                try:
+                    raw_str = json.loads(raw_str)
+                except:
+                    break
+            return raw_str
 
-        # Decode data_json until it's a dict
-        while isinstance(data_str, str):
-            try:
-                data_str = json.loads(data_str)
-            except:
-                break
-        data_json = data_str
-        # Handle .get("items") pattern
+        figma_json = decode_json_recursively(figma_str)
+        data_json = decode_json_recursively(data_str)
         rhs_items = data_json.get("items") if isinstance(data_json, dict) and "items" in data_json else data_json
 
-        # Step 1: Extract headers
+        # Step 1: Extract headers from UI
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        raw = response["message"]["content"]
+        raw_response = response["message"]["content"]
 
         try:
-            parsed = json.loads(raw)
+            parsed_headers = json.loads(raw_response)
         except:
-            match = re.search(r"\{[\s\S]*?\}", raw)
-            parsed = json.loads(match.group()) if match else {}
+            match = re.search(r"\{[\s\S]*?\}", raw_response)
+            parsed_headers = json.loads(match.group()) if match else {}
 
-        headers = list(parsed.keys())
+        headers = list(parsed_headers.keys())
 
-        # Step 2: Build index and match
+        # Step 2: Semantic match using FAISS
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -138,7 +133,7 @@ def api_find_fields():
 
 @app.get("/")
 def home():
-    return jsonify({"message": "POST to /api/find_fields with figma_json and data_json (as raw strings)"})
+    return jsonify({"message": "POST to /api/find_fields with raw JSON strings for figma_json and data_json"})
 
 if __name__ == "__main__":
     print("✅ API running at /api/find_fields")

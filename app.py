@@ -78,7 +78,7 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Safely decode deeply nested JSON string ───────
+# ─────── Decode any nested JSON string until it's dict or list ───────
 def force_decode(raw):
     try:
         while isinstance(raw, str):
@@ -92,19 +92,35 @@ def force_decode(raw):
 def api_find_fields():
     try:
         body = request.get_json(force=True)
-        figma_str = body.get("figma_json")
-        data_str = body.get("data_json")
+
+        # Fix double-wrapped string body issue
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except Exception as e:
+                return jsonify({"error": "Failed to parse outer request body", "details": str(e)}), 400
+
+        # Access keys manually, no .get()
+        if not isinstance(body, dict):
+            return jsonify({"error": "Request must be a JSON object"}), 400
+
+        if "figma_json" not in body or "data_json" not in body:
+            return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
+
+        figma_str = body["figma_json"]
+        data_str = body["data_json"]
 
         if not isinstance(figma_str, str) or not isinstance(data_str, str):
             return jsonify({"error": "figma_json and data_json must be stringified JSON"}), 400
 
-        # Step 1: Fully decode
+        # Decode both
         figma_json = force_decode(figma_str)
         data_json = force_decode(data_str)
 
         print("✅ Type of data_json:", type(data_json))
+        print("✅ Keys in data_json:", data_json.keys() if isinstance(data_json, dict) else "Not a dict")
 
-        # Step 2: Extract items safely (no .get)
+        # Extract right-hand data entries
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
         elif isinstance(data_json, dict):
@@ -112,23 +128,23 @@ def api_find_fields():
         elif isinstance(data_json, list):
             rhs_items = data_json
         else:
-            raise ValueError("Invalid format: data_json must be a dict or list.")
+            raise ValueError("Invalid data_json format: must be a dict or list")
 
-        # Step 3: Extract headers from UI
+        # Extract UI labels
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        raw = response["message"]["content"]
+        raw_response = response["message"]["content"]
 
         try:
-            parsed = json.loads(raw)
+            parsed_headers = json.loads(raw_response)
         except:
-            match = re.search(r"\{[\s\S]*?\}", raw)
-            parsed = json.loads(match.group()) if match else {}
+            match = re.search(r"\{[\s\S]*?\}", raw_response)
+            parsed_headers = json.loads(match.group()) if match else {}
 
-        headers = list(parsed.keys())
+        headers = list(parsed_headers.keys())
 
-        # Step 4: Match to top 5 fields
+        # Semantic match via FAISS
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -141,12 +157,15 @@ def api_find_fields():
         })
 
     except Exception as e:
-        return jsonify({"error": "Find fields failed", "details": str(e)}), 500
+        return jsonify({
+            "error": "Find fields failed",
+            "details": str(e)
+        }), 500
 
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST to /api/find_fields with figma_json and data_json (as raw stringified JSON)"
+        "message": "POST to /api/find_fields with figma_json and data_json as stringified JSON values"
     })
 
 if __name__ == "__main__":

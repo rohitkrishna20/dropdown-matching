@@ -91,8 +91,12 @@ def api_find_fields():
             return jsonify({"error": "figma_json and data_json must be stringified JSON"}), 400
 
         figma_json = json.loads(figma_str)
-        data_json = json.loads(data_str)
+        if isinstance(figma_json, str):
+            figma_json = json.loads(figma_json)
 
+        data_json = json.loads(data_str)
+        if isinstance(data_json, str):
+            data_json = json.loads(data_json)
         # Handle .get("items") pattern
         rhs_items = data_json.get("items") if isinstance(data_json, dict) and "items" in data_json else data_json
 

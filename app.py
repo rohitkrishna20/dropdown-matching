@@ -92,6 +92,8 @@ def force_decode(raw):
 def api_find_fields():
     try:
         body = request.get_json(force=True)
+        body = request.get_json(force=True)
+        print("🧪 Raw body type:", type(body), "| Content:", body)
 
         # Fix double-wrapped string body issue
         if isinstance(body, str):

@@ -6,7 +6,7 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────── Extract all UI text from Figma JSON ───────
+# ─────── Extract all visible Figma UI text ───────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -27,9 +27,9 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    return list(dict.fromkeys(out))  # de-dupe
+    return list(dict.fromkeys(out))  # remove duplicates
 
-# ─────── Build prompt to extract table headers ───────
+# ─────── Prompt for LLM to extract headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
     return f"""
@@ -63,11 +63,12 @@ Return a JSON like this:
   "header2": "...",
   ...
 }}
+
 Raw UI text:
 {blob}
 """.strip()
 
-# ─────── Build FAISS vector index from field names ───────
+# ─────── Create vector index from RHS field names ───────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
@@ -78,7 +79,7 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Decode stringified JSON safely ───────
+# ─────── Robust JSON decoding (unwraps deeply nested strings) ───────
 def force_decode(raw):
     try:
         while isinstance(raw, str):
@@ -87,23 +88,24 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
-# ─────── Main API Endpoint ───────
+# ─────── API Endpoint ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
-        raw = request.get_json(force=True)
-        if isinstance(raw, str):
-            raw = json.loads(raw)
+        body = request.get_json(force=True)
 
-        if not isinstance(raw, dict):
+        if isinstance(body, str):
+            body = json.loads(body)
+        if not isinstance(body, dict):
             return jsonify({"error": "Request must be a JSON object"}), 400
-        if "figma_json" not in raw or "data_json" not in raw:
-            return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
+        if "figma_json" not in body or "data_json" not in body:
+            return jsonify({"error": "Missing 'figma_json' or 'data_json'"}), 400
 
-        figma_json = force_decode(raw["figma_json"])
-        data_json = force_decode(raw["data_json"])
+        # Safe decode for each
+        figma_json = force_decode(body["figma_json"])
+        data_json = force_decode(body["data_json"])
 
-        # Extract fields from RHS data
+        # Extract right-hand data rows
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
         elif isinstance(data_json, list):
@@ -111,6 +113,7 @@ def api_find_fields():
         else:
             rhs_items = [data_json]
 
+        # Extract labels from Figma UI
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
@@ -124,7 +127,7 @@ def api_find_fields():
 
         headers = list(parsed_headers.keys())
 
-        # Build vector search
+        # Build vector index and match each header
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -142,11 +145,11 @@ def api_find_fields():
             "details": str(e)
         }), 500
 
-# ─────── Root route ───────
+# ─────── Health check ───────
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST to /api/find_fields with figma_json and data_json as raw stringified JSON values"
+        "message": "POST to /api/find_fields with figma_json and data_json as stringified JSON strings"
     })
 
 if __name__ == "__main__":

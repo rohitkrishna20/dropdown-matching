@@ -6,6 +6,12 @@ import json, re, ollama
 
 app = Flask(__name__)
 
+# ─────── Memory for Feedback ───────
+feedback_memory = {
+    "correct": {},
+    "incorrect": {}
+}
+
 # ─────── Extract all visible Figma UI text ───────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
@@ -32,7 +38,20 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 # ─────── Prompt for LLM to extract headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-    return f"""
+
+    # Add pattern avoidance from incorrect feedback
+    incorrect_patterns = set()
+    for patterns in feedback_memory["incorrect"].values():
+        incorrect_patterns.update(patterns)
+
+    correct_patterns = set()
+    for patterns in feedback_memory["correct"].values():
+        correct_patterns.update(patterns)
+
+    avoid_text = "\n".join(f"- {p}" for p in incorrect_patterns)
+    include_text = "\n".join(f"- {p}" for p in correct_patterns)
+
+    prompt = f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
 ❌ DO NOT include:
@@ -48,6 +67,7 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Alerts or warnings
 - Dashboard widgets, activity counters
 - Any duplicates or empty entries
+{f"- Patterns to avoid:\n{avoid_text}" if avoid_text else ""}
 
 ✅ DO INCLUDE:
 - Labels that appear once per column in a table
@@ -56,6 +76,7 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Likely to appear in the top row of a table
 - Structured data field categories (not individual values)
 - Not vague, status-based, or action-based
+{f"- Prioritize these patterns:\n{include_text}" if include_text else ""}
 
 Return a JSON like this:
 {{
@@ -67,6 +88,7 @@ Return a JSON like this:
 Raw UI text:
 {blob}
 """.strip()
+    return prompt
 
 # ─────── Create vector index from RHS field names ───────
 def build_faiss_index(rhs_data: list[dict]):
@@ -88,12 +110,11 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
-# ─────── API Endpoint ───────
+# ─────── API Endpoint: Main Matching ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
         body = request.get_json(force=True)
-
         if isinstance(body, str):
             body = json.loads(body)
         if not isinstance(body, dict):
@@ -101,11 +122,9 @@ def api_find_fields():
         if "figma_json" not in body or "data_json" not in body:
             return jsonify({"error": "Missing 'figma_json' or 'data_json'"}), 400
 
-        # Safe decode for each
         figma_json = force_decode(body["figma_json"])
         data_json = force_decode(body["data_json"])
 
-        # Extract right-hand data rows
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
         elif isinstance(data_json, list):
@@ -113,7 +132,6 @@ def api_find_fields():
         else:
             rhs_items = [data_json]
 
-        # Extract labels from Figma UI
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
@@ -127,7 +145,10 @@ def api_find_fields():
 
         headers = list(parsed_headers.keys())
 
-        # Build vector index and match each header
+        # Store pattern history per header
+        for h in headers:
+            feedback_memory["correct"][h] = parsed_headers[h].split()
+
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -145,7 +166,40 @@ def api_find_fields():
             "details": str(e)
         }), 500
 
-# ─────── Health check ───────
+# ─────── API Endpoint: Feedback Learning ───────
+@app.post("/api/feedback")
+def api_feedback():
+    try:
+        body = request.get_json(force=True)
+        header = body.get("header")
+        status = body.get("status")  # "correct" or "incorrect"
+
+        if header not in feedback_memory["correct"]:
+            return jsonify({"error": f"No patterns recorded for header '{header}'"}), 400
+
+        patterns = feedback_memory["correct"].get(header, [])
+
+        if status == "correct":
+            feedback_memory["correct"][header] = patterns
+        elif status == "incorrect":
+            feedback_memory["incorrect"][header] = patterns
+            feedback_memory["correct"].pop(header, None)
+        else:
+            return jsonify({"error": "Invalid status: use 'correct' or 'incorrect'"}), 400
+
+        return jsonify({
+            "header": header,
+            "status": status,
+            "patterns_used": patterns
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": "Feedback failed",
+            "details": str(e)
+        }), 500
+
+# ─────── Health Check ───────
 @app.get("/")
 def home():
     return jsonify({

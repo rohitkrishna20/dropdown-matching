@@ -6,7 +6,7 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────── Extract all UI text from Figma JSON ───────
+# ─────── Extract all visible Figma UI text ───────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -26,7 +26,8 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             for item in node:
                 walk(item)
 
-    return list(dict.fromkeys(out))  # de-dupe
+    walk(figma_json)
+    return list(dict.fromkeys(out))  # remove duplicates
 
 # ─────── Prompt for LLM to extract headers ───────
 def make_prompt(labels: list[str]) -> str:
@@ -91,24 +92,16 @@ def force_decode(raw):
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
-        raw = request.get_json(force=True)
-        if isinstance(raw, str):
-            raw = json.loads(raw)
         body = request.get_json(force=True)
 
-        if not isinstance(raw, dict):
-            if isinstance(body, str):
-                body = json.loads(body)
-            if not isinstance(body, dict):
-                return jsonify({"error": "Request must be a JSON object"}), 400
-
-        if "figma_json" not in raw or "data_json" not in raw:
-            return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
+        if isinstance(body, str):
+            body = json.loads(body)
+        if not isinstance(body, dict):
+            return jsonify({"error": "Request must be a JSON object"}), 400
         if "figma_json" not in body or "data_json" not in body:
             return jsonify({"error": "Missing 'figma_json' or 'data_json'"}), 400
 
-        figma_json = force_decode(raw["figma_json"])
-        data_json = force_decode(raw["data_json"])
+        # Safe decode for each
         figma_json = force_decode(body["figma_json"])
         data_json = force_decode(body["data_json"])
 
@@ -161,3 +154,4 @@ def home():
 
 if __name__ == "__main__":
     print("✅ API running at http://localhost:5000/api/find_fields")
+    app.run(debug=True)

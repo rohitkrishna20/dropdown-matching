@@ -6,13 +6,7 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# ─────── Memory for Feedback ───────
-feedback_memory = {
-    "correct": {},
-    "incorrect": {}
-}
-
-# ─────── Extract all visible Figma UI text ───────
+# ─────── Extract all UI text from Figma JSON ───────
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
 
@@ -32,26 +26,12 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             for item in node:
                 walk(item)
 
-    walk(figma_json)
-    return list(dict.fromkeys(out))  # remove duplicates
+    return list(dict.fromkeys(out))  # de-dupe, preserve order
 
-# ─────── Prompt for LLM to extract headers ───────
+# ─────── Build prompt to extract table headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-
-    # Add pattern avoidance from incorrect feedback
-    incorrect_patterns = set()
-    for patterns in feedback_memory["incorrect"].values():
-        incorrect_patterns.update(patterns)
-
-    correct_patterns = set()
-    for patterns in feedback_memory["correct"].values():
-        correct_patterns.update(patterns)
-
-    avoid_text = "\n".join(f"- {p}" for p in incorrect_patterns)
-    include_text = "\n".join(f"- {p}" for p in correct_patterns)
-
-    prompt = f"""
+    return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
 ❌ DO NOT include:
@@ -67,7 +47,6 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Alerts or warnings
 - Dashboard widgets, activity counters
 - Any duplicates or empty entries
-{f"- Patterns to avoid:\n{avoid_text}" if avoid_text else ""}
 
 ✅ DO INCLUDE:
 - Labels that appear once per column in a table
@@ -76,7 +55,6 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Likely to appear in the top row of a table
 - Structured data field categories (not individual values)
 - Not vague, status-based, or action-based
-{f"- Prioritize these patterns:\n{include_text}" if include_text else ""}
 
 Return a JSON like this:
 {{
@@ -84,13 +62,11 @@ Return a JSON like this:
   "header2": "...",
   ...
 }}
-
 Raw UI text:
 {blob}
 """.strip()
-    return prompt
 
-# ─────── Create vector index from RHS field names ───────
+# ─────── Build FAISS vector index from field names ───────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
@@ -101,7 +77,7 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Robust JSON decoding (unwraps deeply nested strings) ───────
+# ─────── Decode stringified JSON safely ───────
 def force_decode(raw):
     try:
         while isinstance(raw, str):
@@ -110,28 +86,50 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
-# ─────── API Endpoint: Main Matching ───────
+# ─────── Main API Endpoint ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
         body = request.get_json(force=True)
+        print("🧪 Raw body type:", type(body), "| Content:", body)
+
+        # Fix double-wrapped string body issue
         if isinstance(body, str):
-            body = json.loads(body)
+            try:
+                body = json.loads(body)
+            except Exception as e:
+                return jsonify({"error": "Failed to parse outer request body", "details": str(e)}), 400
+
         if not isinstance(body, dict):
             return jsonify({"error": "Request must be a JSON object"}), 400
+
         if "figma_json" not in body or "data_json" not in body:
-            return jsonify({"error": "Missing 'figma_json' or 'data_json'"}), 400
+            return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
 
-        figma_json = force_decode(body["figma_json"])
-        data_json = force_decode(body["data_json"])
+        figma_str = body["figma_json"]
+        data_str = body["data_json"]
 
+        if not isinstance(figma_str, str) or not isinstance(data_str, str):
+            return jsonify({"error": "figma_json and data_json must be stringified JSON"}), 400
+
+        # Decode both
+        figma_json = force_decode(figma_str)
+        data_json = force_decode(data_str)
+
+        print("✅ Type of data_json:", type(data_json))
+        print("✅ Keys in data_json:", data_json.keys() if isinstance(data_json, dict) else "Not a dict")
+
+        # Extract right-hand data entries
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
+        elif isinstance(data_json, dict):
+            rhs_items = [data_json]
         elif isinstance(data_json, list):
             rhs_items = data_json
         else:
-            rhs_items = [data_json]
+            raise ValueError("Invalid data_json format: must be a dict or list")
 
+        # Extract UI labels and prompt model
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
@@ -145,10 +143,7 @@ def api_find_fields():
 
         headers = list(parsed_headers.keys())
 
-        # Store pattern history per header
-        for h in headers:
-            feedback_memory["correct"][h] = parsed_headers[h].split()
-
+        # Semantic match via FAISS
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -166,46 +161,12 @@ def api_find_fields():
             "details": str(e)
         }), 500
 
-# ─────── API Endpoint: Feedback Learning ───────
-@app.post("/api/feedback")
-def api_feedback():
-    try:
-        body = request.get_json(force=True)
-        header = body.get("header")
-        status = body.get("status")  # "correct" or "incorrect"
-
-        if header not in feedback_memory["correct"]:
-            return jsonify({"error": f"No patterns recorded for header '{header}'"}), 400
-
-        patterns = feedback_memory["correct"].get(header, [])
-
-        if status == "correct":
-            feedback_memory["correct"][header] = patterns
-        elif status == "incorrect":
-            feedback_memory["incorrect"][header] = patterns
-            feedback_memory["correct"].pop(header, None)
-        else:
-            return jsonify({"error": "Invalid status: use 'correct' or 'incorrect'"}), 400
-
-        return jsonify({
-            "header": header,
-            "status": status,
-            "patterns_used": patterns
-        })
-
-    except Exception as e:
-        return jsonify({
-            "error": "Feedback failed",
-            "details": str(e)
-        }), 500
-
-# ─────── Health Check ───────
+# ─────── Root route ───────
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST to /api/find_fields with figma_json and data_json as stringified JSON strings"
+        "message": "POST to /api/find_fields with figma_json and data_json as raw stringified JSON values"
     })
 
 if __name__ == "__main__":
     print("✅ API running at http://localhost:5000/api/find_fields")
-    app.run(debug=True)

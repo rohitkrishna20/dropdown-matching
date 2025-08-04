@@ -67,14 +67,26 @@ Raw UI text:
 {blob}
 """.strip()
 
+# ─────── 🔧 NEW: Extract All Keys Recursively ───────
+def extract_all_keys(data, prefix=""):
+    keys = set()
+    if isinstance(data, dict):
+        for k, v in data.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            keys.add(full_key)
+            keys.update(extract_all_keys(v, full_key))
+    elif isinstance(data, list):
+        for item in data:
+            keys.update(extract_all_keys(item, prefix))
+    return keys
+
 # ─────── Build FAISS vector index from field names ───────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
         if isinstance(row, dict):
-            for k in row:
-                if k and isinstance(k, str):
-                    fields.add(k.strip())
+            fields.update(extract_all_keys(row))  # ✅ Use full-depth recursive extraction
+    print("🔍 FAISS index keys (sample):", list(fields)[:10])  # Debug print
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 

@@ -6,10 +6,10 @@ import json, re, ollama
 
 app = Flask(__name__)
 
-# 🔁 Feedback memory for headers
+# Feedback memory
 feedback_memory = {
-    "correct": {},    # header -> [pattern words]
-    "incorrect": {}   # header -> [pattern words]
+    "correct": {},   # header: [patterns]
+    "incorrect": {}  # header: [patterns]
 }
 
 # ─────── Extract all UI text from Figma JSON ───────
@@ -35,30 +35,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     walk(figma_json)
     return list(dict.fromkeys(out))  # de-dupe
 
-# ─────── Extract all nested keys recursively ───────
-def extract_all_keys(data, prefix=""):
-    keys = set()
-    if isinstance(data, dict):
-        for k, v in data.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            keys.add(full_key)
-            keys.update(extract_all_keys(v, full_key))
-    elif isinstance(data, list):
-        for item in data:
-            keys.update(extract_all_keys(item, prefix))
-    return keys
-
-# ─────── FAISS vector index from all RHS keys ───────
-def build_faiss_index(rhs_data: list[dict]):
-    fields = set()
-    for row in rhs_data:
-        if isinstance(row, dict):
-            fields.update(extract_all_keys(row))
-    print("🔍 FAISS index sample keys:", list(fields)[:5])
-    docs = [Document(page_content=field) for field in fields]
-    return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
-
-# ─────── Prompt construction ───────
+# ─────── Build prompt to extract table headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
 
@@ -70,8 +47,8 @@ def make_prompt(labels: list[str]) -> str:
     for patterns in feedback_memory["correct"].values():
         correct_patterns.update(patterns)
 
-    avoid_section = f"\nAdditional patterns to avoid:\n" + "\n".join(f"- {p}" for p in incorrect_patterns) if incorrect_patterns else ""
-    include_section = f"\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns) if correct_patterns else ""
+    avoid_section = "\nAdditional patterns to avoid:\n" + "\n".join(f"- {p}" for p in incorrect_patterns) if incorrect_patterns else ""
+    include_section = "\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns) if correct_patterns else ""
 
     return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
@@ -114,7 +91,29 @@ Raw UI text:
 {blob}
 """.strip()
 
-# ─────── Robust JSON decoding ───────
+# ─────── Extract All Keys Recursively ───────
+def extract_all_keys(data, prefix=""):
+    keys = set()
+    if isinstance(data, dict):
+        for k, v in data.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            keys.add(full_key)
+            keys.update(extract_all_keys(v, full_key))
+    elif isinstance(data, list):
+        for item in data:
+            keys.update(extract_all_keys(item, prefix))
+    return keys
+
+# ─────── Build FAISS vector index from field names ───────
+def build_faiss_index(rhs_data: list[dict]):
+    fields = set()
+    for row in rhs_data:
+        if isinstance(row, dict):
+            fields.update(extract_all_keys(row))
+    docs = [Document(page_content=field) for field in fields]
+    return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
+
+# ─────── Decode stringified JSON safely ───────
 def force_decode(raw):
     try:
         while isinstance(raw, str):
@@ -123,7 +122,7 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
-# ─────── /api/find_fields endpoint ───────
+# ─────── Main API Endpoint ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -139,7 +138,6 @@ def api_find_fields():
         figma_json = force_decode(raw["figma_json"])
         data_json = force_decode(raw["data_json"])
 
-        # Unwrap RHS
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
         elif isinstance(data_json, list):
@@ -160,12 +158,10 @@ def api_find_fields():
 
         headers = list(parsed_headers.keys())
 
-        # ⏺ Save extracted "patterns" for feedback tracking
-        for h in headers:
-            match_pattern = parsed_headers[h]
-            feedback_memory["correct"][h] = match_pattern.split()
+        # Save pattern used per header for feedback
+        for header, pattern in parsed_headers.items():
+            feedback_memory["correct"].setdefault(header, []).append(pattern)
 
-        # 🔍 Search with FAISS
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
@@ -183,26 +179,26 @@ def api_find_fields():
             "details": str(e)
         }), 500
 
-# ─────── Feedback endpoint ───────
+# ─────── Feedback Endpoint ───────
 @app.post("/api/feedback")
 def api_feedback():
     try:
-        body = request.get_json(force=True)
-        header = body.get("header")
-        status = body.get("status")  # "correct" or "incorrect"
+        raw = request.get_json(force=True)
+        header = raw.get("header")
+        status = raw.get("status")
 
-        if header not in feedback_memory["correct"]:
-            return jsonify({"error": f"No patterns recorded for header '{header}'"}), 400
+        if not header or status not in {"correct", "incorrect"}:
+            return jsonify({"error": "Invalid feedback format"}), 400
 
+        # Retrieve pattern used for this header
         patterns = feedback_memory["correct"].get(header, [])
 
+        # Move patterns to correct or incorrect set
         if status == "correct":
-            feedback_memory["correct"][header] = patterns
-        elif status == "incorrect":
-            feedback_memory["incorrect"][header] = patterns
-            feedback_memory["correct"].pop(header, None)
+            feedback_memory["correct"].setdefault(header, []).extend(patterns)
         else:
-            return jsonify({"error": "Invalid status: use 'correct' or 'incorrect'"}), 400
+            feedback_memory["incorrect"].setdefault(header, []).extend(patterns)
+            feedback_memory["correct"].pop(header, None)
 
         return jsonify({
             "header": header,
@@ -216,7 +212,7 @@ def api_feedback():
             "details": str(e)
         }), 500
 
-# ─────── Root ───────
+# ─────── Root route ───────
 @app.get("/")
 def home():
     return jsonify({

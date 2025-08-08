@@ -27,7 +27,6 @@ def save_feedback():
     except Exception as e:
         print(f"⚠️ Could not save feedback file: {e}")
 
-# Feedback memory (persisted)
 feedback_memory = load_feedback()
 
 # ─────── Extract all UI text from Figma JSON ───────
@@ -140,21 +139,53 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
+# ─────── Robust payload extractor for ugly Postman/cURL pastes ───────
+def get_payload(req):
+    # 1) Normal JSON body
+    payload = req.get_json(silent=True)
+    if isinstance(payload, dict) and payload:
+        return payload
+
+    # 2) form-data / x-www-form-urlencoded
+    if req.form:
+        cand = {}
+        if "figma_json" in req.form:
+            cand["figma_json"] = req.form["figma_json"]
+        if "data_json" in req.form:
+            cand["data_json"] = req.form["data_json"]
+        if cand:
+            return cand
+
+    # 3) Raw text: try to grab the first {...} block
+    raw_txt = req.get_data(as_text=True) or ""
+    m = re.search(r"\{[\s\S]*\}", raw_txt)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+
+    # 4) Last resort: pull the two fields individually from key/value-ish text
+    figma_match = re.search(r'"figma_json"\s*:\s*(".*?"|\{[\s\S]*?\}|\[[\s\S]*?\])', raw_txt)
+    data_match  = re.search(r'"data_json"\s*:\s*(".*?"|\{[\s\S]*?\}|\[[\s\S]*?\])', raw_txt)
+    if figma_match and data_match:
+        return {"figma_json": figma_match.group(1), "data_json": data_match.group(1)}
+
+    return None
+
 # ─────── Main API Endpoint ───────
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
-        raw = request.get_json(force=True)
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-
+        # Accept whatever the client sends
+        raw = get_payload(request)
         if not isinstance(raw, dict):
-            return jsonify({"error": "Request must be a JSON object"}), 400
+            return jsonify({"error": "Request must include figma_json and data_json"}), 400
         if "figma_json" not in raw or "data_json" not in raw:
             return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
 
         figma_json = force_decode(raw["figma_json"])
-        data_json = force_decode(raw["data_json"])
+        data_json  = force_decode(raw["data_json"])
 
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
@@ -166,7 +197,7 @@ def api_find_fields():
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
 
-        # Requires local Ollama to be running and model pulled
+        # Requires local Ollama running + model pulled
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw_response = response["message"]["content"]
 
@@ -181,6 +212,7 @@ def api_find_fields():
         # Save pattern used per header for feedback
         for header, pattern in parsed_headers.items():
             feedback_memory["correct"].setdefault(header, []).append(pattern)
+        save_feedback()
 
         # Build FAISS index and match
         index = build_faiss_index(rhs_items)
@@ -189,19 +221,10 @@ def api_find_fields():
             results = index.similarity_search(header, k=5)
             matches[header] = [{"field": r.page_content} for r in results]
 
-        # Persist feedback updates from this run
-        save_feedback()
-
-        return jsonify({
-            "headers_extracted": headers,
-            "matches": matches
-        })
+        return jsonify({"headers_extracted": headers, "matches": matches})
 
     except Exception as e:
-        return jsonify({
-            "error": "Find fields failed",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": "Find fields failed", "details": str(e)}), 500
 
 # ─────── Feedback Endpoint ───────
 @app.post("/api/feedback")
@@ -214,10 +237,9 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # Get the most recent pattern(s) used for the header (if available)
+        # Patterns saved from last find_fields run
         patterns = feedback_memory["correct"].get(header, [])
 
-        # Update memory
         if status == "correct":
             feedback_memory["correct"].setdefault(header, [])
             for p in patterns:
@@ -228,28 +250,21 @@ def api_feedback():
             for p in patterns:
                 if p not in feedback_memory["incorrect"][header]:
                     feedback_memory["incorrect"][header].append(p)
-            # If marked incorrect, drop it from correct memory
             feedback_memory["correct"].pop(header, None)
 
         save_feedback()
 
-        return jsonify({
-            "header": header,
-            "status": status,
-            "patterns_used": patterns
-        })
+        return jsonify({"header": header, "status": status, "patterns_used": patterns})
 
     except Exception as e:
-        return jsonify({
-            "error": "Feedback failed",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": "Feedback failed", "details": str(e)}), 500
 
 # ─────── Root route ───────
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST to /api/find_fields with figma_json and data_json as raw stringified JSON values"
+        "message": "POST to /api/find_fields with figma_json and data_json (objects or stringified JSON). "
+                   "POST to /api/feedback with {header, status}."
     })
 
 if __name__ == "__main__":

@@ -2,15 +2,33 @@ from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
-import json, re, ollama
+import json, re, ollama, os
 
 app = Flask(__name__)
 
-# Feedback memory
-feedback_memory = {
-    "correct": {},   # header: [patterns]
-    "incorrect": {}  # header: [patterns]
-}
+FEEDBACK_PATH = "feedback_memory.json"
+
+# ─────── Feedback memory (load if present) ───────
+def load_feedback():
+    if os.path.exists(FEEDBACK_PATH):
+        try:
+            with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "correct" in data and "incorrect" in data:
+                    return data
+        except Exception:
+            pass
+    return {"correct": {}, "incorrect": {}}
+
+def save_feedback():
+    try:
+        with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
+            json.dump(feedback_memory, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        # Don’t crash the request if disk write fails
+        print(f"Warning: failed to save feedback: {e}")
+
+feedback_memory = load_feedback()
 
 # ─────── Extract all UI text from Figma JSON ───────
 def extract_figma_text(figma_json: dict) -> list[str]:
@@ -147,6 +165,8 @@ def api_find_fields():
 
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
+
+        # Requires local Ollama to be running and model pulled
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw_response = response["message"]["content"]
 
@@ -190,7 +210,7 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # Get the most recent pattern used for the header (if available)
+        # Get the most recent pattern(s) used for the header (if available)
         patterns = feedback_memory["correct"].get(header, [])
 
         # Update memory
@@ -229,4 +249,4 @@ def home():
 
 if __name__ == "__main__":
     print("✅ API running at http://localhost:5000/api/find_fields")
-    app.run(debug=True)
+    app.run(debug=True)  # ← no colon

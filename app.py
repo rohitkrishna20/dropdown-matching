@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
 
-# ─────── Feedback memory (load if present) ───────
+# ─────── Feedback memory: load/save ───────
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -16,8 +16,8 @@ def load_feedback():
                 data = json.load(f)
                 if isinstance(data, dict) and "correct" in data and "incorrect" in data:
                     return data
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Could not load feedback file: {e}")
     return {"correct": {}, "incorrect": {}}
 
 def save_feedback():
@@ -25,9 +25,9 @@ def save_feedback():
         with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
             json.dump(feedback_memory, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        # Don’t crash the request if disk write fails
-        print(f"Warning: failed to save feedback: {e}")
+        print(f"⚠️ Could not save feedback file: {e}")
 
+# Feedback memory (persisted)
 feedback_memory = load_feedback()
 
 # ─────── Extract all UI text from Figma JSON ───────
@@ -172,7 +172,7 @@ def api_find_fields():
 
         try:
             parsed_headers = json.loads(raw_response)
-        except:
+        except Exception:
             match = re.search(r"\{[\s\S]*?\}", raw_response)
             parsed_headers = json.loads(match.group()) if match else {}
 
@@ -182,11 +182,15 @@ def api_find_fields():
         for header, pattern in parsed_headers.items():
             feedback_memory["correct"].setdefault(header, []).append(pattern)
 
+        # Build FAISS index and match
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
             results = index.similarity_search(header, k=5)
             matches[header] = [{"field": r.page_content} for r in results]
+
+        # Persist feedback updates from this run
+        save_feedback()
 
         return jsonify({
             "headers_extracted": headers,
@@ -224,6 +228,7 @@ def api_feedback():
             for p in patterns:
                 if p not in feedback_memory["incorrect"][header]:
                     feedback_memory["incorrect"][header].append(p)
+            # If marked incorrect, drop it from correct memory
             feedback_memory["correct"].pop(header, None)
 
         save_feedback()
@@ -249,4 +254,4 @@ def home():
 
 if __name__ == "__main__":
     print("✅ API running at http://localhost:5000/api/find_fields")
-    app.run(debug=True)  # ← no colon
+    app.run(debug=True)

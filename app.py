@@ -190,15 +190,23 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # Retrieve pattern used for this header
+        # Get the most recent pattern used for the header (if available)
         patterns = feedback_memory["correct"].get(header, [])
 
-        # Move patterns to correct or incorrect set
+        # Update memory
         if status == "correct":
-            feedback_memory["correct"].setdefault(header, []).extend(patterns)
+            feedback_memory["correct"].setdefault(header, [])
+            for p in patterns:
+                if p not in feedback_memory["correct"][header]:
+                    feedback_memory["correct"][header].append(p)
         else:
-            feedback_memory["incorrect"].setdefault(header, []).extend(patterns)
+            feedback_memory["incorrect"].setdefault(header, [])
+            for p in patterns:
+                if p not in feedback_memory["incorrect"][header]:
+                    feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
+
+        save_feedback()
 
         return jsonify({
             "header": header,

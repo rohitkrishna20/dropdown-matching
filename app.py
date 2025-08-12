@@ -2,13 +2,13 @@ from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
-import json, re, ollama, os, ast   # ast is used in tolerant parsing
+import json, re, ollama, os, ast
 
 app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
 
-# ─────── Feedback memory: load/save ───────
+# ========== Persistence ==========
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -18,7 +18,7 @@ def load_feedback():
                     return data
         except Exception as e:
             print(f"⚠️ Could not load feedback file: {e}")
-    return {"correct": {}, "incorrect": {}}
+    return {"correct": {}, "incorrect": {}, "last_run": {}}
 
 def save_feedback():
     try:
@@ -29,16 +29,16 @@ def save_feedback():
 
 feedback_memory = load_feedback()
 
-# ─────── Extract all UI text from Figma JSON ───────
+# ========== Helpers ==========
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
         return cleaned.replace(".", "").isdigit()
-    def walk(node: dict):
+    def walk(node):
         if isinstance(node, dict):
             if node.get("type") == "TEXT":
-                txt = node.get("characters", "").strip()
+                txt = str(node.get("characters", "")).strip()
                 if txt and not is_numeric(txt) and txt.lower() != "text":
                     out.append(txt)
             for v in node.values():
@@ -49,17 +49,27 @@ def extract_figma_text(figma_json: dict) -> list[str]:
     walk(figma_json)
     return list(dict.fromkeys(out))  # de-dupe
 
-# ─────── Build prompt to extract table headers ───────
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
+
     incorrect_patterns = set()
-    for patterns in feedback_memory["incorrect"].values():
-        incorrect_patterns.update(patterns)
+    for pats in feedback_memory["incorrect"].values():
+        incorrect_patterns.update(pats)
     correct_patterns = set()
-    for patterns in feedback_memory["correct"].values():
-        correct_patterns.update(patterns)
-    avoid_section = "\nAdditional patterns to avoid:\n" + "\n".join(f"- {p}" for p in incorrect_patterns) if incorrect_patterns else ""
-    include_section = "\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns) if correct_patterns else ""
+    for pats in feedback_memory["correct"].values():
+        correct_patterns.update(pats)
+    avoid_headers = set(feedback_memory.get("incorrect", {}).keys())
+
+    avoid_lines = []
+    if incorrect_patterns:
+        avoid_lines.append("Additional patterns to avoid:")
+        avoid_lines += [f"- {p}" for p in incorrect_patterns]
+    if avoid_headers:
+        avoid_lines.append("Header names to avoid entirely (do not output these exact headers):")
+        avoid_lines += [f"- {h}" for h in avoid_headers]
+    avoid_section = ("\n" + "\n".join(avoid_lines)) if avoid_lines else ""
+    include_section = ("\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns)) if correct_patterns else ""
+
     return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
@@ -87,9 +97,9 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Not vague, status-based, or action-based
 {include_section}
 
-Return a JSON where:
+Return **strict JSON** where:
 - The key is the extracted column header
-- The value is the **exact label or phrase** you matched it to
+- The value is the exact label or phrase you matched it to
 
 Example:
 {{
@@ -101,7 +111,6 @@ Raw UI text:
 {blob}
 """.strip()
 
-# ─────── Extract All Keys Recursively ───────
 def extract_all_keys(data, prefix=""):
     keys = set()
     if isinstance(data, dict):
@@ -114,7 +123,6 @@ def extract_all_keys(data, prefix=""):
             keys.update(extract_all_keys(item, prefix))
     return keys
 
-# ─────── Build FAISS vector index from field names ───────
 def build_faiss_index(rhs_data: list[dict]):
     fields = set()
     for row in rhs_data:
@@ -123,20 +131,24 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ─────── Light sanitizer for broken JSON-ish strings ───────
+# ---- tolerant parsing for "any JSON format" ----
 def _sanitize_jsonish(s: str) -> str:
     if not isinstance(s, str):
         return s
     t = s.strip()
+    # strip outer single quotes (cURL -d '...')
     if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
         t = t[1:-1]
-    if re.match(r"\s*\{.*\}\s*$", t, flags=re.S) and "'" in t and '"' not in t:
+    # drop trailing commas before } or ]
+    t = re.sub(r",\s*(\}|\])", r"\1", t)
+    # convert Pythonish single-quoted dict to JSON-ish only if no JSON-style keys yet
+    if re.match(r"^\s*[\{\[]", t) and "'" in t and re.search(r'"\s*:', t) is None:
+        t = t.replace("None", "null").replace("True", "true").replace("False", "false")
         t = re.sub(r"'", '"', t)
-    t = re.sub(r",\s*(\}|])", r"\1", t)
     return t
 
-# ─────── Decode stringified JSON safely ───────
 def force_decode(raw):
+    """Decode repeatedly until not a string. Handles JSON, Python-literal-ish, cURL blobs."""
     try:
         while isinstance(raw, str):
             s = _sanitize_jsonish(raw)
@@ -153,78 +165,88 @@ def force_decode(raw):
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
-# ─────── Robust payload extractor for ugly Postman/cURL pastes ───────
 def get_payload(req):
+    """
+    Extracts payload even from messy bodies:
+    - application/json (object or stringified values)
+    - form-data / x-www-form-urlencoded
+    - raw text (cURL --data blobs, single quotes, escaped, trailing commas)
+    """
+    # 1) Standard JSON
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
+
+    # 2) Form-data
     if req.form:
         cand = {}
-        if "figma_json" in req.form:
-            cand["figma_json"] = req.form["figma_json"]
-        if "data_json" in req.form:
-            cand["data_json"] = req.form["data_json"]
-        if "explain" in req.form:
-            cand["explain"] = req.form["explain"]
-        if cand:
-            return cand
-    raw_txt = req.get_data(as_text=True) or ""
-    def _extract_value(text: str, key: str):
-        m = re.search(rf'"{re.escape(key)}"\s*:', text) or re.search(rf"'{re.escape(key)}'\s*:", text)
+        if "figma_json" in req.form: cand["figma_json"] = req.form["figma_json"]
+        if "data_json"  in req.form: cand["data_json"]  = req.form["data_json"]
+        if cand: return cand
+
+    # 3) Scrape raw text for figma_json & data_json values (quote/object/array/primitive)
+    text = req.get_data(as_text=True) or ""
+
+    def grab_value(t: str, key: str):
+        m = re.search(rf'(["\']){re.escape(key)}\1\s*:', t)
         if not m: return None
         i = m.end()
-        while i < len(text) and text[i] in " \t\r\n": i += 1
-        if i >= len(text): return None
-        ch = text[i]
+        while i < len(t) and t[i] in " \t\r\n": i += 1
+        if i >= len(t): return None
+        ch = t[i]
+        # quoted value
         if ch in ('"', "'"):
-            quote = ch; i += 1; out=[]; esc=False
-            while i < len(text):
-                c = text[i]
+            q = ch; i += 1; out=[]; esc=False
+            while i < len(t):
+                c = t[i]
                 if esc: out.append(c); esc=False
                 elif c == "\\": esc=True
-                elif c == quote: break
+                elif c == q: break
                 else: out.append(c)
                 i += 1
-            return quote + "".join(out) + quote
+            return q + "".join(out) + q
+        # object/array value; balance braces/brackets
         if ch in "{[":
-            stack=[ch]; j=i+1; in_str=False; str_q=""; esc=False
-            while j < len(text) and stack:
-                c=text[j]
+            stack=[ch]; j=i+1; in_str=False; q=""; esc=False
+            while j < len(t) and stack:
+                c=t[j]
                 if in_str:
                     if esc: esc=False
                     elif c == "\\": esc=True
-                    elif c == str_q: in_str=False
+                    elif c == q: in_str=False
                 else:
-                    if c in ('"', "'"): in_str=True; str_q=c
+                    if c in ('"', "'"): in_str=True; q=c
                     elif c in "{[": stack.append(c)
                     elif c in "}]": stack.pop()
                 j += 1
-            return text[i:j]
+            return t[i:j]
+        # primitive until comma/brace
         j=i
-        while j < len(text) and text[j] not in ",\n\r}":
+        while j < len(t) and t[j] not in ",\n\r}":
             j += 1
-        return text[i:j].strip()
-    figma_raw = _extract_value(raw_txt, "figma_json")
-    data_raw  = _extract_value(raw_txt, "data_json")
-    explain_raw = _extract_value(raw_txt, "explain")
+        return t[i:j].strip()
+
+    figma_raw = grab_value(text, "figma_json")
+    data_raw  = grab_value(text, "data_json")
     if figma_raw is not None and data_raw is not None:
-        out = {"figma_json": figma_raw, "data_json": data_raw}
-        if explain_raw is not None:
-            out["explain"] = explain_raw
-        return out
-    m = re.search(r"\{[\s\S]*\}", raw_txt)
+        return {"figma_json": figma_raw, "data_json": data_raw}
+
+    # 4) fallback: first {...} block as a whole dict
+    m = re.search(r"\{[\s\S]*\}", text)
     if m:
         s = _sanitize_jsonish(m.group(0))
         try:
-            return json.loads(s)
+            obj = json.loads(s)
+            return obj if isinstance(obj, dict) else None
         except Exception:
             try:
-                return ast.literal_eval(s)
+                obj = ast.literal_eval(s)
+                return obj if isinstance(obj, dict) else None
             except Exception:
                 pass
     return None
 
-# ─────── Main API Endpoint ───────
+# ========== API ==========
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -244,10 +266,9 @@ def api_find_fields():
         else:
             rhs_items = [data_json]
 
+        # Build prompt and call LLM
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
-
-        # LLM
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw_response = response["message"]["content"]
 
@@ -259,35 +280,37 @@ def api_find_fields():
 
         headers = list(parsed_headers.keys())
 
-        # Build FAISS index and match
+        # Build FAISS index and find matches
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
-            results = index.similarity_search(header, k=5)
-            matches[header] = [{"field": r.page_content} for r in results]
+            try:
+                res = index.similarity_search_with_score(header, k=5)
+                matches[header] = [{"field": r[0].page_content, "score": float(r[1])} for r in res]
+            except Exception:
+                res = index.similarity_search(header, k=5)
+                matches[header] = [{"field": r.page_content} for r in res]
 
-        # Save pattern used per header for feedback
+        # Save pattern used per header + context for later explanation
         for header, pattern in parsed_headers.items():
             feedback_memory["correct"].setdefault(header, []).append(pattern)
-
-        # NEW: store last-run context so feedback can explain later
-        feedback_memory.setdefault("last_run", {})  # ← NEW
-        for header in headers:                      # ← NEW
-            feedback_memory["last_run"][header] = { # ← NEW
-                "matched_label": parsed_headers.get(header),
-                "figma_text": figma_text,                 # UI text considered
-                "prompt_used": prompt,                    # exact prompt
-                "faiss_matches": matches.get(header, [])  # JSON field candidates
-            }                                             # ← NEW
+            feedback_memory["last_run"][header] = {
+                "matched_label": pattern,
+                "figma_text": figma_text,
+                "prompt_used": prompt,
+                "faiss_matches": matches.get(header, [])
+            }
 
         save_feedback()
 
-        return jsonify({"headers_extracted": headers, "matches": matches})
+        return jsonify({
+            "headers_extracted": headers,
+            "matches": matches
+        })
 
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
 
-# ─────── Feedback Endpoint (auto‑explain on 'incorrect') ───────
 @app.post("/api/feedback")
 def api_feedback():
     try:
@@ -298,10 +321,9 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # Patterns saved from last find_fields run
+        # Patterns from last run
         patterns = feedback_memory["correct"].get(header, [])
 
-        # Update memory
         if status == "correct":
             feedback_memory["correct"].setdefault(header, [])
             for p in patterns:
@@ -314,16 +336,16 @@ def api_feedback():
                     feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # NEW: if marked incorrect, generate an explanation using stored context
-        explanation = None                                      # ← NEW
-        if status == "incorrect":                               # ← NEW
-            ctx = (feedback_memory.get("last_run") or {}).get(header, {})     # ← NEW
-            matched_label = ctx.get("matched_label")                             # ← NEW
-            faiss_matches = ctx.get("faiss_matches", [])                         # ← NEW
-            figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])        # ← NEW
+        # If incorrect, generate a short explanation from stored context
+        explanation = None
+        if status == "incorrect":
+            ctx = (feedback_memory.get("last_run") or {}).get(header, {})
+            matched_label = ctx.get("matched_label")
+            faiss_matches = ctx.get("faiss_matches", [])
+            figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
 
-            explain_prompt = f"""                                              # ← NEW
-Explain, in 3–5 sentences (no chain-of-thought), why the system produced the header "{header}".
+            explain_prompt = f"""
+Explain (3–5 sentences, no chain-of-thought) why the system produced the header "{header}".
 Mention the decisive UI cues and how likely JSON fields align.
 
 Matched UI label (verbatim): {matched_label}
@@ -331,12 +353,11 @@ Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
 Sample of UI text considered:
 {figma_sample}
 """.strip()
-
-            try:                                                                # ← NEW
+            try:
                 exp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": explain_prompt}])
                 explanation = exp["message"]["content"]
             except Exception as oe:
-                explanation = f"(Explanation unavailable: {oe})"               # ← NEW
+                explanation = f"(Explanation unavailable: {oe})"
 
         save_feedback()
 
@@ -344,18 +365,17 @@ Sample of UI text considered:
             "header": header,
             "status": status,
             "patterns_used": patterns,
-            "explanation": explanation  # ← NEW (None unless status == "incorrect")
+            "explanation": explanation
         })
 
     except Exception as e:
         return jsonify({"error": "Feedback failed", "details": str(e)}), 500
 
-# ─────── Root route ───────
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST to /api/find_fields with figma_json and data_json (objects or stringified JSON). "
-                   "POST to /api/feedback with {header, status}. If status='incorrect', you'll also get an explanation."
+        "message": "POST /api/find_fields with figma_json and data_json (any JSON-ish format is accepted). "
+                   "POST /api/feedback with {header, status}. If status='incorrect', returns an explanation."
     })
 
 if __name__ == "__main__":

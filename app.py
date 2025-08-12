@@ -8,16 +8,19 @@ app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
 
-# ========== Persistence ==========
+# ========= persistence =========
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
             with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, dict) and "correct" in data and "incorrect" in data:
+                if isinstance(data, dict):
+                    data.setdefault("correct", {})
+                    data.setdefault("incorrect", {})
+                    data.setdefault("last_run", {})
                     return data
         except Exception as e:
-            print(f"⚠️ Could not load feedback file: {e}")
+            print(f"⚠️ load_feedback: {e}")
     return {"correct": {}, "incorrect": {}, "last_run": {}}
 
 def save_feedback():
@@ -25,11 +28,11 @@ def save_feedback():
         with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
             json.dump(feedback_memory, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"⚠️ Could not save feedback file: {e}")
+        print(f"⚠️ save_feedback: {e}")
 
 feedback_memory = load_feedback()
 
-# ========== Helpers ==========
+# ========= helpers =========
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
     def is_numeric(t: str) -> bool:
@@ -51,14 +54,9 @@ def extract_figma_text(figma_json: dict) -> list[str]:
 
 def make_prompt(labels: list[str]) -> str:
     blob = "\n".join(f"- {t}" for t in labels)
-
-    incorrect_patterns = set()
-    for pats in feedback_memory["incorrect"].values():
-        incorrect_patterns.update(pats)
-    correct_patterns = set()
-    for pats in feedback_memory["correct"].values():
-        correct_patterns.update(pats)
-    avoid_headers = set(feedback_memory.get("incorrect", {}).keys())
+    incorrect_patterns = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
+    correct_patterns = set(p for pats in feedback_memory["correct"].values() for p in pats)
+    avoid_headers = set(feedback_memory["incorrect"].keys())
 
     avoid_lines = []
     if incorrect_patterns:
@@ -141,7 +139,7 @@ def _sanitize_jsonish(s: str) -> str:
         t = t[1:-1]
     # drop trailing commas before } or ]
     t = re.sub(r",\s*(\}|\])", r"\1", t)
-    # convert Pythonish single-quoted dict to JSON-ish only if no JSON-style keys yet
+    # convert Python-ish single-quoted dict to JSON only if no JSON-style keys yet
     if re.match(r"^\s*[\{\[]", t) and "'" in t and re.search(r'"\s*:', t) is None:
         t = t.replace("None", "null").replace("True", "true").replace("False", "false")
         t = re.sub(r"'", '"', t)
@@ -246,7 +244,7 @@ def get_payload(req):
                 pass
     return None
 
-# ========== API ==========
+# ========= API =========
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -292,6 +290,7 @@ def api_find_fields():
                 matches[header] = [{"field": r.page_content} for r in res]
 
         # Save pattern used per header + context for later explanation
+        feedback_memory.setdefault("last_run", {})
         for header, pattern in parsed_headers.items():
             feedback_memory["correct"].setdefault(header, []).append(pattern)
             feedback_memory["last_run"][header] = {
@@ -300,7 +299,6 @@ def api_find_fields():
                 "prompt_used": prompt,
                 "faiss_matches": matches.get(header, [])
             }
-
         save_feedback()
 
         return jsonify({
@@ -321,7 +319,6 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # Patterns from last run
         patterns = feedback_memory["correct"].get(header, [])
 
         if status == "correct":
@@ -336,7 +333,7 @@ def api_feedback():
                     feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # If incorrect, generate a short explanation from stored context
+        # Explanation for incorrect
         explanation = None
         if status == "incorrect":
             ctx = (feedback_memory.get("last_run") or {}).get(header, {})
@@ -346,7 +343,7 @@ def api_feedback():
 
             explain_prompt = f"""
 Explain (3–5 sentences, no chain-of-thought) why the system produced the header "{header}".
-Mention the decisive UI cues and how likely JSON fields align.
+Mention decisive UI cues and how likely JSON fields align.
 
 Matched UI label (verbatim): {matched_label}
 Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
@@ -374,8 +371,8 @@ Sample of UI text considered:
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST /api/find_fields with figma_json and data_json (any JSON-ish format is accepted). "
-                   "POST /api/feedback with {header, status}. If status='incorrect', returns an explanation."
+        "message": "POST /api/find_fields with figma_json and data_json (any JSON-ish format accepted). "
+                   "POST /api/feedback with {header, status}. If status='incorrect', you also get an explanation."
     })
 
 if __name__ == "__main__":

@@ -64,9 +64,21 @@ def make_prompt(labels: list[str]) -> str:
     for patterns in feedback_memory["correct"].values():
         correct_patterns.update(patterns)
 
-    avoid_section = "\nAdditional patterns to avoid:\n" + "\n".join(f"- {p}" for p in incorrect_patterns) if incorrect_patterns else ""
-    include_section = "\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns) if correct_patterns else ""
+    # NEW: also avoid previously rejected header names entirely
+    avoid_headers = set(feedback_memory.get("incorrect", {}).keys())
 
+    avoid_lines = []
+    if incorrect_patterns:
+        avoid_lines.append("Additional patterns to avoid:")
+        avoid_lines += [f"- {p}" for p in incorrect_patterns]
+    if avoid_headers:
+        avoid_lines.append("Header names to avoid entirely (do not output these exact headers):")
+        avoid_lines += [f"- {h}" for h in avoid_headers]
+
+    avoid_section = ("\n" + "\n".join(avoid_lines)) if avoid_lines else ""
+    include_section = ("\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns)) if correct_patterns else ""
+
+    # NEW: ask LLM for compact provenance (matched label + short justification)
     return f"""
 You are extracting column headers from a raw Figma-based UI. Focus only on **structured table column headers**.
 
@@ -94,14 +106,16 @@ You are extracting column headers from a raw Figma-based UI. Focus only on **str
 - Not vague, status-based, or action-based
 {include_section}
 
-Return a JSON where:
+Return **strict JSON** where:
 - The key is the extracted column header
-- The value is the **exact label or phrase** you matched it to
+- The value is an object with:
+  - "matched_label": the exact UI text you matched to decide this header
+  - "justification": one short sentence explaining the choice
 
 Example:
 {{
-  "Name": "Full Name",
-  "Location": "City"
+  "Name": {{ "matched_label": "Full Name", "justification": "Appears as a table column heading for people." }},
+  "Location": {{ "matched_label": "City", "justification": "City is the geographic column header." }}
 }}
 
 Raw UI text:
@@ -197,6 +211,9 @@ def api_find_fields():
         figma_text = extract_figma_text(figma_json)
         prompt = make_prompt(figma_text)
 
+        # Track prompt used for provenance
+        run_meta = {"prompt": prompt, "llm_model": "llama3.2"}
+
         # Requires local Ollama running + model pulled
         response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
         raw_response = response["message"]["content"]
@@ -207,21 +224,60 @@ def api_find_fields():
             match = re.search(r"\{[\s\S]*?\}", raw_response)
             parsed_headers = json.loads(match.group()) if match else {}
 
-        headers = list(parsed_headers.keys())
+        # parsed_headers may be {header: "pattern"} (old) or {header: {matched_label, justification}} (new)
+        if isinstance(parsed_headers, dict):
+            headers = list(parsed_headers.keys())
+        else:
+            parsed_headers = {}
+            headers = []
 
-        # Save pattern used per header for feedback
-        for header, pattern in parsed_headers.items():
-            feedback_memory["correct"].setdefault(header, []).append(pattern)
-        save_feedback()
+        # NEW: hard block any headers previously marked incorrect
+        blocked = set(feedback_memory.get("incorrect", {}).keys())
+        headers = [h for h in headers if h not in blocked]
 
-        # Build FAISS index and match
+        # Build FAISS index and match (with scores for provenance)
         index = build_faiss_index(rhs_items)
         matches = {}
         for header in headers:
-            results = index.similarity_search(header, k=5)
-            matches[header] = [{"field": r.page_content} for r in results]
+            # with scores
+            try:
+                results = index.similarity_search_with_score(header, k=5)
+                matches[header] = [{"field": r[0].page_content, "score": float(r[1])} for r in results]
+            except Exception:
+                # fallback if the installed version lacks _with_score
+                results = index.similarity_search(header, k=5)
+                matches[header] = [{"field": r.page_content} for r in results]
 
-        return jsonify({"headers_extracted": headers, "matches": matches})
+        # Save pattern used per header for feedback + provenance
+        feedback_memory.setdefault("last_run", {})
+        for header in headers:
+            info = parsed_headers.get(header, {})
+            if isinstance(info, dict):
+                pattern = info.get("matched_label")
+                justification = info.get("justification")
+            else:
+                # backward compat: old behavior returns just the pattern string
+                pattern = info
+                justification = None
+
+            if pattern:
+                feedback_memory["correct"].setdefault(header, []).append(pattern)
+
+            feedback_memory["last_run"][header] = {
+                "matched_label": pattern,
+                "justification": justification,
+                "faiss_matches": matches.get(header, []),
+                "prompt_used": run_meta["prompt"]
+            }
+
+        save_feedback()
+
+        # Return provenance for visibility
+        return jsonify({
+            "headers_extracted": headers,
+            "matches": matches,
+            "provenance": {h: feedback_memory["last_run"].get(h, {}) for h in headers}
+        })
 
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500

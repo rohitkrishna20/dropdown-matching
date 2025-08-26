@@ -131,57 +131,150 @@ def _sanitize_jsonish(s: str) -> str:
     if not isinstance(s, str):
         return s
     t = s.strip()
-    # strip outer single quotes (cURL -d '...')
+
+    # strip outer single quotes (curl -d '...')
     if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
         t = t[1:-1]
-    # drop trailing commas before } or ]
+
+    # remove trailing commas before } or ]
     t = re.sub(r",\s*(\}|\])", r"\1", t)
-    # convert Python-ish single-quoted dict to JSON only if no JSON-style keys yet
-    if re.match(r"^\s*[\{\[]", t) and "'" in t and re.search(r'"\s*:', t) is None:
-        t = t.replace("None", "null").replace("True", "true").replace("False", "false")
-        t = re.sub(r"'", '"', t)
+
+    # normalize Pythonish literals to JSON
+    t = t.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
+    t = t.replace(":None", ": null").replace(":True", ": true").replace(":False", ": false")
+
     return t
 
+
+def _pyish_to_json(s: str) -> str:
+    """
+    Best-effort: if it looks like a dict/array and mostly uses single quotes,
+    flip single quotes to double quotes while preserving existing escapes.
+    """
+    if not isinstance(s, str):
+        return s
+    t = s
+
+    # If it already has a lot of double-quoted keys/values, don't touch
+    has_json_keys = re.search(r'"\s*:\s*', t) is not None
+    if has_json_keys:
+        return t
+
+    # Only operate if it looks like a dict/array and contains single quotes
+    if not re.match(r"^\s*[\{\[]", t) or "'" not in t:
+        return t
+
+    # Replace unescaped single quotes with double quotes inside { ... } / [ ... ]
+    # This is intentionally conservative to avoid breaking \' in strings.
+    def replacer(m):
+        chunk = m.group(0)
+        # Convert single quotes that wrap words/numbers to double quotes
+        chunk = re.sub(r"(?<!\\)'", '"', chunk)
+        return chunk
+
+    t = re.sub(r"[\{\[][^\0]*[\}\]]", replacer, t, count=1)  # one pass is usually enough
+    return t
+
+
 def force_decode(raw):
+    """
+    Decode repeatedly until the value is no longer a string.
+    Uses only json and light transformations (no ast/codecs).
+    Handles:
+      - proper JSON
+      - stringified JSON
+      - over-escaped JSON with lots of backslashes
+      - single-quoted Python-ish dicts (best effort)
+    """
     try:
-        while isinstance(raw, str):
+        rounds = 0
+        while isinstance(raw, str) and rounds < 6:
+            rounds += 1
             s = _sanitize_jsonish(raw)
+
+            # Try plain JSON
             try:
-                raw = json.loads(s); continue
+                raw = json.loads(s)
+                continue
             except Exception:
                 pass
+
+            # Try un-escaping common backslashes once, then JSON
+            # (without codecs: use encode/decode to handle \" \n \t)
             try:
-                raw = ast.literal_eval(s); continue
+                s2 = s.encode("utf-8").decode("unicode_escape")
+                if s2 != s:
+                    try:
+                        raw = json.loads(s2)
+                        continue
+                    except Exception:
+                        s = s2  # keep improved string for next step
             except Exception:
                 pass
+
+            # Try Python-ish -> JSON conversion (single quotes -> double quotes)
+            s3 = _pyish_to_json(s)
+            if s3 != s:
+                try:
+                    raw = json.loads(s3)
+                    continue
+                except Exception:
+                    pass
+
+            # If still a string that itself *looks* like JSON, strip one layer of quotes and try again
+            if re.match(r'^\s*"(?:\\.|[^"])*"\s*$', s):
+                raw = s.strip()[1:-1]
+                continue
+
             break
+
         return raw
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
+
 def get_payload(req):
-    # 1) Standard JSON
+    """
+    Accepts:
+      - application/json (object or stringified field values)
+      - form-data / x-www-form-urlencoded (text fields)
+      - multipart file uploads: 'figma_json', 'data_json'
+      - raw text (cURL --data blobs; single quotes; extra escapes)
+    Returns a dict with keys 'figma_json' and 'data_json' when possible.
+    """
+    # 1) Normal JSON body
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
 
-    # 2) Form-data
+    # 2) Form fields
     if req.form:
         cand = {}
-        if "figma_json" in req.form: cand["figma_json"] = req.form["figma_json"]
-        if "data_json"  in req.form: cand["data_json"]  = req.form["data_json"]
+        if "figma_json" in req.form: cand["figma_json"] = req.form.get("figma_json")
+        if "data_json"  in req.form: cand["data_json"]  = req.form.get("data_json")
         if cand: return cand
 
-    # 3) Scrape raw text for figma_json & data_json values (quote/object/array/primitive)
+    # 3) File uploads
+    if req.files:
+        cand = {}
+        if "figma_json" in req.files:
+            cand["figma_json"] = req.files["figma_json"].read().decode("utf-8", errors="ignore")
+        if "data_json" in req.files:
+            cand["data_json"] = req.files["data_json"].read().decode("utf-8", errors="ignore")
+        if cand: return cand
+
+    # 4) Raw text scraping (messy cURL snippets)
     text = req.get_data(as_text=True) or ""
 
     def grab_value(t: str, key: str):
+        # find "key":  or 'key':
         m = re.search(rf'(["\']){re.escape(key)}\1\s*:', t)
         if not m: return None
         i = m.end()
         while i < len(t) and t[i] in " \t\r\n": i += 1
         if i >= len(t): return None
         ch = t[i]
+
         # quoted value
         if ch in ('"', "'"):
             q = ch; i += 1; out=[]; esc=False
@@ -193,7 +286,8 @@ def get_payload(req):
                 else: out.append(c)
                 i += 1
             return q + "".join(out) + q
-        # object/array value; balance braces/brackets
+
+        # object/array: balance braces/brackets with string awareness
         if ch in "{[":
             stack=[ch]; j=i+1; in_str=False; q=""; esc=False
             while j < len(t) and stack:
@@ -208,30 +302,35 @@ def get_payload(req):
                     elif c in "}]": stack.pop()
                 j += 1
             return t[i:j]
-        # primitive until comma/brace
+
+        # primitive until comma/brace/newline
         j=i
         while j < len(t) and t[j] not in ",\n\r}":
             j += 1
         return t[i:j].strip()
 
-    figma_raw = grab_value(text, "figma_json")
-    data_raw  = grab_value(text, "data_json")
-    if figma_raw is not None and data_raw is not None:
-        return {"figma_json": figma_raw, "data_json": data_raw}
+    f_raw = grab_value(text, "figma_json")
+    d_raw = grab_value(text, "data_json")
+    if f_raw is not None and d_raw is not None:
+        return {"figma_json": f_raw, "data_json": d_raw}
 
-    # 4) fallback: first {...} block as a whole dict
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        s = _sanitize_jsonish(m.group(0))
+    # 5) Last resort: first {...} blob as a whole dict (try JSON only, with sanitization)
+    blob = re.search(r"\{[\s\S]*\}", text)
+    if blob:
+        s = _sanitize_jsonish(blob.group(0))
+        s = _pyish_to_json(s)
         try:
             obj = json.loads(s)
-            return obj if isinstance(obj, dict) else None
+            if isinstance(obj, dict): return obj
         except Exception:
+            # one more light unescape+json try
             try:
-                obj = ast.literal_eval(s)
-                return obj if isinstance(obj, dict) else None
+                s2 = s.encode("utf-8").decode("unicode_escape")
+                obj = json.loads(s2)
+                if isinstance(obj, dict): return obj
             except Exception:
                 pass
+
     return None
 
 @app.post("/api/find_fields")

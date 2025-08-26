@@ -51,6 +51,15 @@ cd dropdown-matching
   "path": "data/DataRightHS.json"
 },
 "header": "opportunity" - # can change opportunity to another keyword for matching for a different keyword
+
+- use method POST - - URL: https://localhost:5000/api/feedback
+- body tab: choose raw - select json as the dropdown
+
+  {
+  "header": "Product Name"
+  "status": "incorrect"
+  }
+  - response gives an explanation to why that header was selected 
   
 
   

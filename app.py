@@ -155,18 +155,14 @@ def _pyish_to_json(s: str) -> str:
         return s
     t = s
 
-    # If it already has a lot of double-quoted keys/values, don't touch
     has_json_keys = re.search(r'"\s*:\s*', t) is not None
     if has_json_keys:
         return t
 
-    # Only operate if it looks like a dict/array and contains single quotes
     if not re.match(r"^\s*[\{\[]", t) or "'" not in t:
         return t
 
-    # Replace unescaped single quotes with double quotes inside { ... } / [ ... ]
-    # This is intentionally conservative to avoid breaking \' in strings.
-    def replacer(m):
+      def replacer(m):
         chunk = m.group(0)
         # Convert single quotes that wrap words/numbers to double quotes
         chunk = re.sub(r"(?<!\\)'", '"', chunk)
@@ -234,14 +230,7 @@ def force_decode(raw):
 
 
 def get_payload(req):
-    """
-    Accepts:
-      - application/json (object or stringified field values)
-      - form-data / x-www-form-urlencoded (text fields)
-      - multipart file uploads: 'figma_json', 'data_json'
-      - raw text (cURL --data blobs; single quotes; extra escapes)
-    Returns a dict with keys 'figma_json' and 'data_json' when possible.
-    """
+    
     # 1) Normal JSON body
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:

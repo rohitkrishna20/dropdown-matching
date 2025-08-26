@@ -8,7 +8,6 @@ app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
 
-# ========= persistence =========
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -32,7 +31,6 @@ def save_feedback():
 
 feedback_memory = load_feedback()
 
-# ========= helpers =========
 def extract_figma_text(figma_json: dict) -> list[str]:
     out = []
     def is_numeric(t: str) -> bool:
@@ -129,7 +127,6 @@ def build_faiss_index(rhs_data: list[dict]):
     docs = [Document(page_content=field) for field in fields]
     return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
 
-# ---- tolerant parsing for "any JSON format" ----
 def _sanitize_jsonish(s: str) -> str:
     if not isinstance(s, str):
         return s
@@ -146,7 +143,6 @@ def _sanitize_jsonish(s: str) -> str:
     return t
 
 def force_decode(raw):
-    """Decode repeatedly until not a string. Handles JSON, Python-literal-ish, cURL blobs."""
     try:
         while isinstance(raw, str):
             s = _sanitize_jsonish(raw)
@@ -164,12 +160,6 @@ def force_decode(raw):
         raise ValueError(f"Failed to decode JSON: {e}")
 
 def get_payload(req):
-    """
-    Extracts payload even from messy bodies:
-    - application/json (object or stringified values)
-    - form-data / x-www-form-urlencoded
-    - raw text (cURL --data blobs, single quotes, escaped, trailing commas)
-    """
     # 1) Standard JSON
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
@@ -244,7 +234,6 @@ def get_payload(req):
                 pass
     return None
 
-# ========= API =========
 @app.post("/api/find_fields")
 def api_find_fields():
     try:

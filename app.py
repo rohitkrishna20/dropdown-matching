@@ -299,6 +299,7 @@ def api_find_fields():
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
 
 @app.post("/api/feedback")
+@app.post("/api/feedback")
 def api_feedback():
     try:
         raw = request.get_json(force=True)
@@ -324,20 +325,33 @@ def api_feedback():
                     feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # 🔥 Generate an explanation for BOTH statuses
+        # === Status-aware explanation (always generated) ===
         explanation = None
         ctx = (feedback_memory.get("last_run") or {}).get(header, {})
         matched_label = ctx.get("matched_label")
         faiss_matches = ctx.get("faiss_matches", [])
         figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
 
-        explain_prompt = f"""
-Explain why the system produced the header "{header}" and marked it as {status}.
-Mention the decisive UI cues, matched label, and JSON fields that influenced this choice.
+        if status == "correct":
+            explain_prompt = f"""
+Provide a concise, neutral explanation (3–5 sentences) of the *patterns used* to extract this header.
+Do NOT evaluate or critique. Do NOT speculate about mistakes.
+Focus only on: the matched UI label, column-like cues (singular/once-per-row, placement), and alignment with JSON candidates.
 
-Matched UI label: {matched_label}
+Header: {header}
+Matched UI label (verbatim): {matched_label}
 Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
-Sample UI text considered:
+Sample of UI text considered:
+{figma_sample}
+""".strip()
+        else:
+            explain_prompt = f"""
+Explain (3–5 sentences) the patterns that led to extracting the header "{header}" even though it was marked incorrect.
+Focus on the decisive UI cues and how JSON candidates aligned; avoid chain-of-thought.
+
+Matched UI label (verbatim): {matched_label}
+Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
+Sample of UI text considered:
 {figma_sample}
 """.strip()
 
@@ -358,7 +372,6 @@ Sample UI text considered:
 
     except Exception as e:
         return jsonify({"error": "Feedback failed", "details": str(e)}), 500
-
 @app.get("/")
 def home():
     return jsonify({

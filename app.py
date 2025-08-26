@@ -308,8 +308,10 @@ def api_feedback():
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
+        # Patterns from last run
         patterns = feedback_memory["correct"].get(header, [])
 
+        # Update memory
         if status == "correct":
             feedback_memory["correct"].setdefault(header, [])
             for p in patterns:
@@ -322,28 +324,28 @@ def api_feedback():
                     feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # Explanation for incorrect
+        # 🔥 Generate an explanation for BOTH statuses
         explanation = None
-        if status == "incorrect":
-            ctx = (feedback_memory.get("last_run") or {}).get(header, {})
-            matched_label = ctx.get("matched_label")
-            faiss_matches = ctx.get("faiss_matches", [])
-            figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
+        ctx = (feedback_memory.get("last_run") or {}).get(header, {})
+        matched_label = ctx.get("matched_label")
+        faiss_matches = ctx.get("faiss_matches", [])
+        figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
 
-            explain_prompt = f"""
-Explain (3–5 sentences, no chain-of-thought) why the system produced the header "{header}".
-Mention decisive UI cues and how likely JSON fields align.
+        explain_prompt = f"""
+Explain why the system produced the header "{header}" and marked it as {status}.
+Mention the decisive UI cues, matched label, and JSON fields that influenced this choice.
 
-Matched UI label (verbatim): {matched_label}
+Matched UI label: {matched_label}
 Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
-Sample of UI text considered:
+Sample UI text considered:
 {figma_sample}
 """.strip()
-            try:
-                exp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": explain_prompt}])
-                explanation = exp["message"]["content"]
-            except Exception as oe:
-                explanation = f"(Explanation unavailable: {oe})"
+
+        try:
+            exp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": explain_prompt}])
+            explanation = exp["message"]["content"]
+        except Exception as oe:
+            explanation = f"(Explanation unavailable: {oe})"
 
         save_feedback()
 

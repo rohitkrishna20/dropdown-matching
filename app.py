@@ -443,4 +443,4 @@ def home():
 if __name__ == "__main__":
     print("✅ API running at http://localhost:5000")
     print("ℹ️  Ollama:", get_ollama_info())
-    app.run(debug=True)
+    python3 app.py --port 5001

@@ -1,14 +1,17 @@
+# app.py
 from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
-import json, re, ollama, os, requests
+import json, re, os, requests, ollama
 
 app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
+OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
-# ========= persistence =========
+# ============== persistence ==============
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -32,8 +35,9 @@ def save_feedback():
 
 feedback_memory = load_feedback()
 
-# ========= helpers =========
+# ============== helpers ==============
 def extract_figma_text(figma_json: dict) -> list[str]:
+    """Collect visible UI strings from Figma nodes of type TEXT."""
     out = []
     def is_numeric(t: str) -> bool:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
@@ -50,55 +54,11 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             for item in node:
                 walk(item)
     walk(figma_json)
-    return list(dict.fromkeys(out))  # de-dupe
-
-# === CHANGE #1: stricter prompt (limit to candidate labels only) ===
-def make_prompt(labels: list[str]) -> str:
-    # Only allow choosing from the extracted UI labels
-    allowed = [t.strip() for t in labels if isinstance(t, str) and t.strip()]
-    blob = "\n".join(f"- {t}" for t in allowed)
-
-    incorrect_patterns = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
-    correct_patterns   = set(p for pats in feedback_memory["correct"].values()   for p in pats)
-    avoid_headers      = set(feedback_memory["incorrect"].keys())
-
-    avoid_lines = []
-    if incorrect_patterns:
-        avoid_lines.append("Additional patterns to avoid:")
-        avoid_lines += [f"- {p}" for p in incorrect_patterns]
-    if avoid_headers:
-        avoid_lines.append("Header names to avoid entirely (do not output these exact headers):")
-        avoid_lines += [f"- {h}" for h in avoid_headers]
-    avoid_section = ("\n" + "\n".join(avoid_lines)) if avoid_lines else ""
-    include_section = ("\nPrioritize patterns similar to:\n" + "\n".join(f"- {p}" for p in correct_patterns)) if correct_patterns else ""
-
-    return f"""
-You are extracting table COLUMN HEADERS from a Figma-based UI.
-
-CANDIDATE LABELS (you MUST map from ONLY this list; do not invent new labels):
-{blob}
-
-❌ DO NOT include:
-- Anything not present in the candidate label list
-- Status fields, vague terms, repeated labels, action buttons, section names, alerts
-- Data values from rows, company/customer names, email/contact words, 'status' words
-{avoid_section}
-
-✅ DO INCLUDE:
-- Labels that appear once per column in a table
-- Short (1–3 words), clear, descriptive
-{include_section}
-
-OUTPUT: STRICT JSON. Keys = your normalized headers. Values = the **exact label from the candidate list** that you matched.
-
-Example:
-{{
-  "Name": "Full Name",
-  "Location": "City"
-}}
-""".strip()
+    # de-dup while preserving order
+    return list(dict.fromkeys([t for t in out if t]))
 
 def extract_all_keys(data, prefix=""):
+    """Flatten nested dict/list into dotted key paths (field names only)."""
     keys = set()
     if isinstance(data, dict):
         for k, v in data.items():
@@ -110,40 +70,31 @@ def extract_all_keys(data, prefix=""):
             keys.update(extract_all_keys(item, prefix))
     return keys
 
-def build_faiss_index(rhs_data: list[dict]):
-    fields = set()
-    for row in rhs_data:
-        if isinstance(row, dict):
-            fields.update(extract_all_keys(row))
-    docs = [Document(page_content=field) for field in fields]
-    return FAISS.from_documents(docs, OllamaEmbeddings(model="llama3.2"))
+def build_faiss_over_fieldnames(field_names: list[str]):
+    docs = [Document(page_content=fn) for fn in field_names]
+    return FAISS.from_documents(docs, OllamaEmbeddings(model=OLLAMA_MODEL))
 
-# ---------- tolerant JSON intake (no ast/codecs) ----------
+# ---------- tolerant JSON intake ----------
 def _sanitize_jsonish(s: str) -> str:
-    if not isinstance(s, str):
-        return s
+    if not isinstance(s, str): return s
     t = s.strip()
-    if len(t) >= 2 and t[0] == "'" and t[-1] == "'":
-        t = t[1:-1]
+    if len(t) >= 2 and t[0] == "'" and t[-1] == "'": t = t[1:-1]
     t = re.sub(r",\s*(\}|\])", r"\1", t)
-    t = t.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
-    t = t.replace(":None", ": null").replace(":True", ": true").replace(":False", ": false")
+    t = (t.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
+           .replace(":None", ": null").replace(":True", ": true").replace(":False", ": false"))
     return t
 
 def _pyish_to_json(s: str) -> str:
-    if not isinstance(s, str):
-        return s
+    if not isinstance(s, str): return s
     t = s
-    if re.search(r'"\s*:\s*', t):
+    if re.search(r'"\s*:\s*', t):  # likely already JSON
         return t
     if not re.match(r"^\s*[\{\[]", t) or "'" not in t:
         return t
     def replacer(m):
         chunk = m.group(0)
-        chunk = re.sub(r"(?<!\\)'", '"', chunk)
-        return chunk
-    t = re.sub(r"[\{\[][^\0]*[\}\]]", replacer, t, count=1)
-    return t
+        return re.sub(r"(?<!\\)'", '"', chunk)
+    return re.sub(r"[\{\[][^\0]*[\}\]]", replacer, t, count=1)
 
 def force_decode(raw):
     try:
@@ -152,44 +103,39 @@ def force_decode(raw):
             rounds += 1
             s = _sanitize_jsonish(raw)
             try:
-                raw = json.loads(s)
-                continue
-            except Exception:
-                pass
+                raw = json.loads(s); continue
+            except Exception: pass
             try:
                 s2 = s.encode("utf-8").decode("unicode_escape")
                 if s2 != s:
                     try:
-                        raw = json.loads(s2)
-                        continue
-                    except Exception:
-                        s = s2
-            except Exception:
-                pass
+                        raw = json.loads(s2); continue
+                    except Exception: s = s2
+            except Exception: pass
             s3 = _pyish_to_json(s)
             if s3 != s:
                 try:
-                    raw = json.loads(s3)
-                    continue
-                except Exception:
-                    pass
-            if re.match(r'^\s*"(?:\\.|[^"])*"\s*$', s):
-                raw = s.strip()[1:-1]
-                continue
+                    raw = json.loads(s3); continue
+                except Exception: pass
+            if re.match(r'^\s*"(?:\\.|[^"])*"\s*$', s):  # quoted blob
+                raw = s.strip()[1:-1]; continue
             break
         return raw
     except Exception as e:
         raise ValueError(f"Failed to decode JSON: {e}")
 
 def get_payload(req):
+    # 1) JSON body
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
+    # 2) form-data / x-www-form-urlencoded
     if req.form:
         cand = {}
         if "figma_json" in req.form: cand["figma_json"] = req.form.get("figma_json")
         if "data_json"  in req.form: cand["data_json"]  = req.form.get("data_json")
         if cand: return cand
+    # 3) files
     if req.files:
         cand = {}
         if "figma_json" in req.files:
@@ -197,6 +143,7 @@ def get_payload(req):
         if "data_json" in req.files:
             cand["data_json"] = req.files["data_json"].read().decode("utf-8", errors="ignore")
         if cand: return cand
+    # 4) raw text (ugly cURL/pastes)
     text = req.get_data(as_text=True) or ""
     def grab_value(t: str, key: str):
         m = re.search(rf'(["\']){re.escape(key)}\1\s*:', t)
@@ -209,7 +156,7 @@ def get_payload(req):
             q = ch; i += 1; out=[]; esc=False
             while i < len(t):
                 c = t[i]
-                if esc: out.append(c); esc=False
+                if esc: esc=False if c != "\\" else True
                 elif c == "\\": esc=True
                 elif c == q: break
                 else: out.append(c)
@@ -230,8 +177,7 @@ def get_payload(req):
                 j += 1
             return t[i:j]
         j=i
-        while j < len(t) and t[j] not in ",\n\r}":
-            j += 1
+        while j < len(t) and t[j] not in ",\n\r}": j += 1
         return t[i:j].strip()
     f_raw = grab_value(text, "figma_json")
     d_raw = grab_value(text, "data_json")
@@ -253,17 +199,13 @@ def get_payload(req):
                 pass
     return None
 
-# ========= Ollama info (CHANGE #2: add endpoint to show host & models) =========
-OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-
+# ============== Ollama info ==============
 def get_ollama_info():
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         if r.status_code == 200:
-            return {
-                "ollama_host": OLLAMA_URL,
-                "models": [m.get("name") for m in r.json().get("models", [])]
-            }
+            return {"ollama_host": OLLAMA_URL,
+                    "models": [m.get("name") for m in r.json().get("models", [])]}
         return {"ollama_host": OLLAMA_URL, "error": f"status {r.status_code}"}
     except Exception as e:
         return {"ollama_host": OLLAMA_URL, "error": str(e)}
@@ -272,7 +214,32 @@ def get_ollama_info():
 def api_ollama_info():
     return jsonify(get_ollama_info())
 
-# ========= API =========
+# ============== LLM prompt (FIGMA -> headers only) ==============
+def make_prompt_from_figma(labels: list[str]) -> str:
+    blob = "\n".join(f"- {t}" for t in labels)
+    # allow user feedback to bias/avoid patterns
+    incorrect = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
+    correct   = set(p for pats in feedback_memory["correct"].values()   for p in pats)
+    avoid = ("\nAvoid patterns like:\n" + "\n".join(f"- {p}" for p in incorrect)) if incorrect else ""
+    prefer = ("\nPrefer patterns like:\n" + "\n".join(f"- {p}" for p in correct)) if correct else ""
+
+    return f"""
+You are extracting TABLE COLUMN HEADERS from Figma UI text below.
+
+RULES:
+- Use ONLY labels that appear in the list (do not invent anything).
+- Headers should be compact (1–3 words), column-like, not actions/status/menus.
+
+{avoid}
+{prefer}
+
+OUTPUT: JSON object where keys are your extracted headers and values are the EXACT UI label you matched.
+
+Figma UI labels:
+{blob}
+""".strip()
+
+# ============== API routes ==============
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -282,9 +249,11 @@ def api_find_fields():
         if "figma_json" not in raw or "data_json" not in raw:
             return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
 
+        # decode inputs (accept stringified, double-escaped, etc.)
         figma_json = force_decode(raw["figma_json"])
         data_json  = force_decode(raw["data_json"])
 
+        # collect RHS items and its field-name universe
         if isinstance(data_json, dict) and "items" in data_json:
             rhs_items = data_json["items"]
         elif isinstance(data_json, list):
@@ -292,71 +261,50 @@ def api_find_fields():
         else:
             rhs_items = [data_json]
 
-        # Build prompt and call LLM
-        figma_text = extract_figma_text(figma_json)
-        prompt = make_prompt(figma_text)
-        response = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": prompt}])
-        raw_response = response["message"]["content"]
+        rhs_fields = sorted(list(extract_all_keys(rhs_items)))    # allowed match targets
+        # Build FAISS index over RHS FIELD NAMES (not values)
+        field_index = build_faiss_over_fieldnames(rhs_fields)
+
+        # 1) HEADERS ONLY FROM FIGMA
+        figma_labels = extract_figma_text(figma_json)
+        prompt = make_prompt_from_figma(figma_labels)
+        model_out = ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": prompt}])
+        content = model_out["message"]["content"]
 
         try:
-            parsed_headers = json.loads(raw_response)
+            parsed = json.loads(content) or {}
         except Exception:
-            match = re.search(r"\{[\s\S]*?\}", raw_response)
-            parsed_headers = json.loads(match.group()) if match else {}
+            m = re.search(r"\{[\s\S]*?\}", content)
+            parsed = json.loads(m.group()) if m else {}
 
-        # === NEW: drop any pairs whose matched label isn't in the candidate list ===
-        allowed_set = set(figma_text)
-        parsed_headers = {
-            h: m for h, m in (parsed_headers or {}).items()
-            if isinstance(m, str) and m in allowed_set
-        }
+        # keep only headers that actually appear in the Figma text list
+        headers = [h for h in parsed.keys() if isinstance(h, str) and parsed[h] in figma_labels]
 
-        headers = list(parsed_headers.keys())
-
-        # Build FAISS index and find matches
-        index = build_faiss_index(rhs_items)
+        # 2) For each header, return top-3 most similar RHS field names
         matches = {}
         for header in headers:
             try:
-                res = index.similarity_search_with_score(header, k=5)
+                res = field_index.similarity_search_with_score(header, k=3)
                 matches[header] = [{"field": r[0].page_content, "score": float(r[1])} for r in res]
             except Exception:
-                res = index.similarity_search(header, k=5)
+                res = field_index.similarity_search(header, k=3)
                 matches[header] = [{"field": r.page_content} for r in res]
 
-        # Save pattern used per header + context for later explanation
-        feedback_memory.setdefault("last_run", {})
-        for header, pattern in parsed_headers.items():
-            feedback_memory["correct"].setdefault(header, []).append(pattern)
-            feedback_memory["last_run"][header] = {
-                "matched_label": pattern,
-                "figma_text": figma_text,
-                "prompt_used": prompt,
-                "faiss_matches": matches.get(header, [])
+        # record last run for explanations
+        feedback_memory["last_run"] = {}
+        for h in headers:
+            feedback_memory["correct"].setdefault(h, []).append(parsed[h])  # store matched UI label
+            feedback_memory["last_run"][h] = {
+                "matched_ui_label": parsed[h],
+                "figma_text": figma_labels,
+                "top_rhs_candidates": matches.get(h, [])
             }
         save_feedback()
 
-        # Optional debug via query/body
-        debug_flag = False
-        try:
-            body_json = request.get_json(silent=True) or {}
-            debug_flag = bool(body_json.get("debug"))
-        except Exception:
-            pass
-        if request.args.get("debug") in {"1","true","yes"}:
-            debug_flag = True
-
-        resp = {"headers_extracted": headers, "matches": matches}
-        if debug_flag:
-            resp["debug"] = {
-                "ollama": get_ollama_info(),
-                "figma_text_count": len(figma_text),
-                "figma_text_sample": figma_text[:30],
-                "prompt_chars": len(prompt),
-                "raw_model_output": raw_response[:1500],
-                "parsed_header_map": parsed_headers
-            }
-        return jsonify(resp)
+        return jsonify({
+            "headers_extracted": headers,   # from Figma only
+            "matches": matches              # top-3 RHS field-name candidates for each header
+        })
 
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
@@ -364,15 +312,14 @@ def api_find_fields():
 @app.post("/api/feedback")
 def api_feedback():
     try:
-        raw = request.get_json(force=True)
-        header = raw.get("header")
-        status = raw.get("status")
-
+        body = request.get_json(force=True)
+        header = body.get("header")
+        status = body.get("status")  # "correct" | "incorrect"
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
+        # update memories
         patterns = feedback_memory["correct"].get(header, [])
-
         if status == "correct":
             feedback_memory["correct"].setdefault(header, [])
             for p in patterns:
@@ -385,37 +332,37 @@ def api_feedback():
                     feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # status-aware explanation
-        explanation = None
+        # explanation request (always neutral; if incorrect, explain likely confusion)
         ctx = (feedback_memory.get("last_run") or {}).get(header, {})
-        matched_label = ctx.get("matched_label")
-        faiss_matches = ctx.get("faiss_matches", [])
+        matched_ui = ctx.get("matched_ui_label")
+        rhs_cands  = ctx.get("top_rhs_candidates", [])
         figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
 
         if status == "correct":
             explain_prompt = f"""
-Provide a concise, neutral explanation (3–5 sentences) of the *patterns used* to extract this header.
-Do NOT critique. Focus on: the matched UI label, column-like cues, and alignment with JSON candidates.
+Briefly explain (3–5 sentences) the patterns used to select this header from Figma UI text.
+Focus on the matched UI label and column-like cues. Do not critique.
 
 Header: {header}
-Matched UI label: {matched_label}
-Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
-Sample UI text:
+Matched UI label: {matched_ui}
+Top RHS candidates: {json.dumps(rhs_cands, ensure_ascii=False)}
+Sample Figma text:
 {figma_sample}
 """.strip()
         else:
             explain_prompt = f"""
-Explain (3–5 sentences) the patterns that led to extracting "{header}" even though it was marked incorrect.
-Mention the decisive UI cues and how JSON candidates aligned.
+Explain (3–5 sentences) how the system might have chosen this header from the Figma UI text,
+and why that could be misleading given the context.
 
-Matched UI label: {matched_label}
-Top JSON field candidates: {json.dumps(faiss_matches, ensure_ascii=False)}
-Sample UI text:
+Header: {header}
+Matched UI label: {matched_ui}
+Top RHS candidates: {json.dumps(rhs_cands, ensure_ascii=False)}
+Sample Figma text:
 {figma_sample}
 """.strip()
 
         try:
-            exp = ollama.chat(model="llama3.2", messages=[{"role": "user", "content": explain_prompt}])
+            exp = ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": explain_prompt}])
             explanation = exp["message"]["content"]
         except Exception as oe:
             explanation = f"(Explanation unavailable: {oe})"
@@ -425,7 +372,7 @@ Sample UI text:
         return jsonify({
             "header": header,
             "status": status,
-            "patterns_used": patterns,
+            "patterns_used": patterns,     # prior matched UI labels we stored
             "explanation": explanation
         })
 
@@ -435,12 +382,23 @@ Sample UI text:
 @app.get("/")
 def home():
     return jsonify({
-        "message": "POST /api/find_fields with figma_json and data_json (any JSON-ish format accepted). "
-                   "POST /api/feedback with {header, status}. If status='incorrect' or 'correct', you get an explanation. "
-                   "GET /api/ollama_info to see which Ollama host/models are active."
+        "message": "POST /api/find_fields with {figma_json, data_json}. "
+                   "Headers come ONLY from Figma; for each header we return top-3 RHS fields from data_json. "
+                   "POST /api/feedback with {header, status} to store feedback and get an explanation. "
+                   "GET /api/ollama_info to see Ollama host/models."
     })
 
 if __name__ == "__main__":
-    print("✅ API running at http://localhost:5000")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("PORT", "5000")),   # 👈 default now 5000
+        help="Port to run the API server on"
+    )
+    args = parser.parse_args()
+
+    print(f"✅ API running at http://localhost:{args.port}")
     print("ℹ️  Ollama:", get_ollama_info())
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=args.port, debug=True)

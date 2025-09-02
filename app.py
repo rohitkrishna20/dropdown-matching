@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
@@ -58,7 +59,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         w = t.strip()
         if not w or is_numeric(w): return False
         parts = w.split()
-        # allow 1–3 words; avoid very long labels (section titles)
+        # allow 1–4 words; avoid very long labels (section titles)
         if len(parts) == 0 or len(parts) > 4: return False
         if w.lower() in BAD_NAMES: return False
         return True
@@ -90,6 +91,7 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
+    # de-dup preserve order
     uniq, seen = [], set()
     for s in out:
         if s not in seen:
@@ -217,14 +219,17 @@ def force_decode(raw):
         raise ValueError(f"Failed to decode JSON: {e}")
 
 def get_payload(req):
+    # 1) JSON body
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
+    # 2) form-data / x-www-form-urlencoded
     if req.form:
         cand = {}
         if "figma_json" in req.form: cand["figma_json"] = req.form.get("figma_json")
         if "data_json"  in req.form: cand["data_json"]  = req.form.get("data_json")
         if cand: return cand
+    # 3) files
     if req.files:
         cand = {}
         if "figma_json" in req.files:
@@ -232,6 +237,7 @@ def get_payload(req):
         if "data_json" in req.files:
             cand["data_json"] = req.files["data_json"].read().decode("utf-8", errors="ignore")
         if cand: return cand
+    # 4) raw text (ugly cURL/pastes)
     text = req.get_data(as_text=True) or ""
     def grab_value(t: str, key: str):
         m = re.search(rf'(["\']){re.escape(key)}\1\s*:', t)
@@ -413,28 +419,32 @@ def api_find_fields():
 
         # save last_run for explanations
         feedback_memory["last_run"] = {}
-        feedback_memory["correct"].setdefault(h, []).append(h)
-        feedback_memory["last_run"][h] = {
-            "matched_ui_label": h,
-            "figma_text": figma_labels,
-            "top_rhs_candidates": matches.get(h, [])
-        }
-    save_feedback()
-
-    # optional debug
-    if request.args.get("debug") in {"1", "true"}:
-        return jsonify({
-            "headers_extracted": headers,
-            "matches": matches,
-            "debug": {
-                "figma_label_count": len(figma_labels),
-                "figma_sample": figma_labels[:15],
-                "model_raw_len": len(content),
-                "parsed_keys": list(parsed.keys())[:10]
+        for h in headers:
+            feedback_memory["correct"].setdefault(h, []).append(h)
+            feedback_memory["last_run"][h] = {
+                "matched_ui_label": h,
+                "figma_text": figma_labels,
+                "top_rhs_candidates": matches.get(h, [])
             }
-        })
+        save_feedback()
 
-    return jsonify({"headers_extracted": headers, "matches": matches})
+        # optional debug
+        if request.args.get("debug") in {"1", "true"}:
+            return jsonify({
+                "headers_extracted": headers,
+                "matches": matches,
+                "debug": {
+                    "figma_label_count": len(figma_labels),
+                    "figma_sample": figma_labels[:15],
+                    "model_raw_len": len(content),
+                    "parsed_keys": list(parsed.keys())[:10]
+                }
+            })
+
+        return jsonify({"headers_extracted": headers, "matches": matches})
+
+    except Exception as e:
+        return jsonify({"error": "Find fields failed", "details": str(e)}), 500
 
 # ============== Feedback route ==============
 @app.post("/api/feedback")

@@ -413,7 +413,7 @@ def api_find_fields():
 
         # save last_run for explanations
         feedback_memory["last_run"] = {}
-       feedback_memory["correct"].setdefault(h, []).append(h)
+        feedback_memory["correct"].setdefault(h, []).append(h)
         feedback_memory["last_run"][h] = {
             "matched_ui_label": h,
             "figma_text": figma_labels,

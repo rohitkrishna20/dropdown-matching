@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
@@ -39,6 +38,7 @@ feedback_memory = load_feedback()
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else s
 
+# --- Figma text extraction (broader + header-ish) ---
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
     Collect visible-ish UI strings.
@@ -58,7 +58,8 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         w = t.strip()
         if not w or is_numeric(w): return False
         parts = w.split()
-        if len(parts) == 0 or len(parts) > 3: return False
+        # allow 1–3 words; avoid very long labels (section titles)
+        if len(parts) == 0 or len(parts) > 4: return False
         if w.lower() in BAD_NAMES: return False
         return True
 
@@ -96,20 +97,73 @@ def extract_figma_text(figma_json: dict) -> list[str]:
             uniq.append(s)
     return uniq
 
-def extract_all_keys(data, prefix=""):
-    keys = set()
-    if isinstance(data, dict):
-        for k, v in data.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            keys.add(full_key)
-            keys.update(extract_all_keys(v, full_key))
-    elif isinstance(data, list):
-        for item in data:
-            keys.update(extract_all_keys(item, prefix))
-    return keys
+# --- prefer column-like tokens in fallback ---
+COMMON_HEADER_TOKENS = {
+    "name","id","account","owner","status","stage","type","amount","value",
+    "date","created","updated","email","phone","city","state","country",
+    "priority","category","product","quantity","price","score","rank"
+}
+def headerish(s: str) -> bool:
+    if not isinstance(s, str): return False
+    w = s.strip()
+    if not w: return False
+    parts = w.split()
+    if len(parts) > 4:
+        return False
+    tokens = {t.lower().strip(",:;()[]{}") for t in parts}
+    return bool(tokens & COMMON_HEADER_TOKENS) or (1 <= len(parts) <= 3 and w.istitle())
 
-def build_faiss_over_fieldnames(field_names: list[str]):
-    docs = [Document(page_content=fn) for fn in field_names]
+# --- RHS field collection: skip OpenAPI scaffolding; keep deep/leaf-like fields ---
+def collect_candidate_fields(data):
+    """
+    Return a list of dotted field paths that look like actual data columns.
+    - Ignore OpenAPI roots: paths, servers, tags (they aren't columns)
+    - Keep deep 'leaf-like' keys (primitives) and components.schemas.*.properties.* entries
+    - Require a minimum depth to avoid generic roots
+    """
+    IGNORE_ROOTS = {"paths", "servers", "tags"}
+    MIN_DEPTH = 3  # require at least a.b.c
+
+    out = set()
+
+    def is_primitive(x):
+        return isinstance(x, (str, int, float, bool)) or x is None
+
+    def walk(node, prefix=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if prefix == "" and k in IGNORE_ROOTS:
+                    # ignore top-level OpenAPI scaffolding
+                    continue
+
+                new_prefix = f"{prefix}.{k}" if prefix else k
+
+                # Special: components.schemas.*.properties.* are likely "real" fields
+                if new_prefix.startswith("components.schemas.") and ".properties." in new_prefix:
+                    out.add(new_prefix)
+
+                if is_primitive(v):
+                    if new_prefix.count(".") + 1 >= MIN_DEPTH:
+                        out.add(new_prefix)
+                else:
+                    walk(v, new_prefix)
+
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, prefix)
+
+    walk(data)
+    return sorted(out)
+
+def build_faiss_over_fieldnames(candidate_paths: list[str]):
+    """
+    Build FAISS over the *leaf token* of each path (better semantic match),
+    but preserve full dotted path in metadata for returning results.
+    """
+    docs = []
+    for p in candidate_paths:
+        leaf = p.split(".")[-1]
+        docs.append(Document(page_content=leaf, metadata={"path": p}))
     return FAISS.from_documents(docs, OllamaEmbeddings(model=OLLAMA_MODEL))
 
 # ---------- tolerant JSON intake ----------
@@ -287,16 +341,9 @@ def api_find_fields():
         figma_json = force_decode(raw["figma_json"])
         data_json  = force_decode(raw["data_json"])
 
-        # RHS items
-        if isinstance(data_json, dict) and "items" in data_json:
-            rhs_items = data_json["items"]
-        elif isinstance(data_json, list):
-            rhs_items = data_json
-        else:
-            rhs_items = [data_json]
-
-        rhs_fields = sorted(list(extract_all_keys(rhs_items)))
-        field_index = build_faiss_over_fieldnames(rhs_fields)
+        # RHS candidates (deep/leaf-like) and FAISS over leaf tokens
+        rhs_fields_paths = collect_candidate_fields(data_json)
+        field_index = build_faiss_over_fieldnames(rhs_fields_paths)
 
         # 1) FIGMA labels
         figma_labels = extract_figma_text(figma_json)
@@ -326,64 +373,70 @@ def api_find_fields():
         norm_figma = {_norm(x) for x in figma_labels}
         headers = []
         if isinstance(parsed, dict):
-            for k, v in parsed.items():
+            for _, v in parsed.items():
                 if isinstance(v, str) and _norm(v) in norm_figma:
                     headers.append(v)  # use matched UI label directly as header
 
         # fallback if model gave nothing usable: pick header-ish labels from Figma
         if not headers:
-            def headerish(s: str) -> bool:
-                if not isinstance(s, str): return False
-                w = s.strip()
-                if not w: return False
-                parts = w.split()
-                return 1 <= len(parts) <= 3
-            headers = [s for s in figma_labels if headerish(s)][:12]
+            candidates = [s for s in figma_labels if headerish(s)]
+            if not candidates:
+                candidates = figma_labels
+            headers = candidates[:12]
 
         # de-dup preserve order
         seen = set()
         headers = [h for h in headers if not (h in seen or seen.add(h))]
 
-        # 2) top-3 matches per header from RHS field names
+        # 2) top-5 matches per header from RHS candidate paths (return full dotted path)
         matches = {}
         for header in headers:
             try:
-                res = field_index.similarity_search_with_score(header, k=3)
-                matches[header] = [{"field": r[0].page_content, "score": float(r[1])} for r in res]
+                res = field_index.similarity_search_with_score(header, k=5)
+                matches[header] = [
+                    {
+                        "field": r[0].metadata.get("path", r[0].page_content),  # full path
+                        "leaf": r[0].page_content,  # leaf token used for match
+                        "score": float(r[1])
+                    }
+                    for r in res
+                ]
             except Exception:
-                res = field_index.similarity_search(header, k=3)
-                matches[header] = [{"field": r.page_content} for r in res]
+                res = field_index.similarity_search(header, k=5)
+                matches[header] = [
+                    {
+                        "field": doc.metadata.get("path", doc.page_content),
+                        "leaf": doc.page_content
+                    }
+                    for doc in res
+                ]
 
         # save last_run for explanations
         feedback_memory["last_run"] = {}
-        for h in headers:
-            # store the label itself as a "pattern"
-            feedback_memory["correct"].setdefault(h, []).append(h)
-            feedback_memory["last_run"][h] = {
-                "matched_ui_label": h,
-                "figma_text": figma_labels,
-                "top_rhs_candidates": matches.get(h, [])
+       feedback_memory["correct"].setdefault(h, []).append(h)
+        feedback_memory["last_run"][h] = {
+            "matched_ui_label": h,
+            "figma_text": figma_labels,
+            "top_rhs_candidates": matches.get(h, [])
+        }
+    save_feedback()
+
+    # optional debug
+    if request.args.get("debug") in {"1", "true"}:
+        return jsonify({
+            "headers_extracted": headers,
+            "matches": matches,
+            "debug": {
+                "figma_label_count": len(figma_labels),
+                "figma_sample": figma_labels[:15],
+                "model_raw_len": len(content),
+                "parsed_keys": list(parsed.keys())[:10]
             }
-        save_feedback()
+        })
 
-        # optional debug
-        if request.args.get("debug") in {"1", "true"}:
-            return jsonify({
-                "headers_extracted": headers,
-                "matches": matches,
-                "debug": {
-                    "figma_label_count": len(figma_labels),
-                    "figma_sample": figma_labels[:15],
-                    "model_raw_len": len(content),
-                    "parsed_keys": list(parsed.keys())[:10]
-                }
-            })
+    return jsonify({"headers_extracted": headers, "matches": matches})
 
-        return jsonify({"headers_extracted": headers, "matches": matches})
-
-    except Exception as e:
-        return jsonify({"error": "Find fields failed", "details": str(e)}), 500
-
+# ============== Feedback route ==============
 @app.post("/api/feedback")
 def api_feedback():
     try:
@@ -453,22 +506,24 @@ Sample Figma text:
     except Exception as e:
         return jsonify({"error": "Feedback failed", "details": str(e)}), 500
 
+# ============== Root ==============
 @app.get("/")
 def home():
     return jsonify({
         "message": "POST /api/find_fields with {figma_json, data_json}. "
-                   "Headers come ONLY from Figma; for each header we return top-3 RHS fields from data_json. "
+                   "Headers come ONLY from Figma; for each header we return top-5 RHS fields from data_json. "
                    "POST /api/feedback with {header, status} to store feedback and get an explanation. "
                    "GET /api/ollama_info to see Ollama host/models. Add ?debug=1 to /api/find_fields to inspect."
     })
 
+# ============== Runner ==============
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("PORT", "5000")),   # default 5000
+        default=int(os.getenv("PORT", "5000")),
         help="Port to run the API server on"
     )
     args = parser.parse_args()

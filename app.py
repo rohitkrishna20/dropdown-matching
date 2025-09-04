@@ -367,6 +367,29 @@ def api_find_fields():
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
 
+        # --- ADDED FALLBACK A: permissive harvest if TEXT-based extract is empty ---
+        if not figma_labels:
+            def _harvest_strings(node, bag):
+                if isinstance(node, dict):
+                    for v in node.values():
+                        if isinstance(v, str):
+                            sv = v.strip()
+                            if 1 <= len(sv) <= 40 and _is_headerish(sv):
+                                bag.append(sv)
+                        elif isinstance(v, (dict, list)):
+                            _harvest_strings(v, bag)
+                elif isinstance(node, list):
+                    for it in node:
+                        _harvest_strings(it, bag)
+            _bag = []
+            _harvest_strings(figma_json, _bag)
+            seen_tmp = set(); figma_labels = []
+            for s in _bag:
+                if s not in seen_tmp:
+                    seen_tmp.add(s)
+                    figma_labels.append(s)
+        # --- END FALLBACK A ---
+
         # 🔴 NEW: drop labels previously marked incorrect (candidate filter)
         blocked_norm = build_blocklist()
         figma_labels = [lbl for lbl in figma_labels if _norm(lbl) not in blocked_norm]
@@ -424,6 +447,18 @@ def api_find_fields():
 
         # 🔴 NEW: final safety filter against blocklist
         headers = [h for h in headers if _norm(h) not in blocked_norm]
+
+        # --- ADDED MIN-5 TOP-UP: guarantee at least 5 headers when possible ---
+        if len(headers) < 5:
+            extras = [
+                x for x in figma_labels
+                if _norm(x) not in blocked_norm
+                and x not in headers
+                and has_rhs_affinity(x, rhs_meta, min_overlap=0.20)
+            ]
+            need = 5 - len(headers)
+            headers += extras[:need]
+        # --- END MIN-5 TOP-UP ---
 
         headers = headers[:15]
 

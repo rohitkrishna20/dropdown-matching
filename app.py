@@ -70,11 +70,27 @@ def _is_headerish(s: str) -> bool:
     # avoid very long tokens
     if any(len(p) > 28 for p in parts): return False
     # avoid shouty tool words and number soup
-    if _is_mostly_upper(w): return False
-    if _is_mostly_numeric(w): return False
+    if _is_mostly_upper(s): return False
+    if _is_mostly_numeric(s): return False
     # must contain a letter
-    if not any(c.isalpha() for c in w): return False
+    if not any(c.isalpha() for c in s): return False
     return True
+
+# 🔴 NEW: build blocklist from incorrect feedback
+def build_blocklist() -> set:
+    """
+    Normalized set of headers/patterns to never output again,
+    sourced from feedback_memory['incorrect'].
+    """
+    blocked = set()
+    inc = feedback_memory.get("incorrect", {}) or {}
+    for hdr, pats in inc.items():
+        blocked.add(_norm(hdr))
+        if isinstance(pats, list):
+            for p in pats:
+                if isinstance(p, str):
+                    blocked.add(_norm(p))
+    return blocked
 
 # ============== tolerant JSON intake (no extra deps) ==============
 def force_decode(raw):
@@ -320,6 +336,10 @@ def api_find_fields():
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
 
+        # 🔴 NEW: drop labels previously marked incorrect (candidate filter)
+        blocked_norm = build_blocklist()
+        figma_labels = [lbl for lbl in figma_labels if _norm(lbl) not in blocked_norm]
+
         # LLM selection from candidate labels (unchanged style)
         headers = []
         if figma_labels:
@@ -369,7 +389,12 @@ def api_find_fields():
 
         # de-dup, cap
         seen = set()
-        headers = [h for h in gated if not (h in seen or seen.add(h))][:15]
+        headers = [h for h in gated if not (h in seen or seen.add(h))]
+
+        # 🔴 NEW: final safety filter against blocklist
+        headers = [h for h in headers if _norm(h) not in blocked_norm]
+
+        headers = headers[:15]
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}
@@ -422,7 +447,10 @@ def api_feedback():
                 if p not in feedback_memory["correct"][header]:
                     feedback_memory["correct"][header].append(p)
         else:
+            # 🔴 NEW: move header & its patterns to incorrect (permanent block)
             feedback_memory["incorrect"].setdefault(header, [])
+            if header not in feedback_memory["incorrect"][header]:
+                feedback_memory["incorrect"][header].append(header)
             for p in patterns:
                 if p not in feedback_memory["incorrect"][header]:
                     feedback_memory["incorrect"][header].append(p)

@@ -221,6 +221,7 @@ Extract TABLE COLUMN HEADERS from the candidate label list.
 - Use ONLY labels that appear in the list (do not invent).
 - Keep them short (1–3 words), human-readable, column-like (not actions/menus/status).
 - ALWAYS RETURN an output - never have any empty headers!
+- NEVER select a header with "_" or "#"
 
 {avoid}
 {prefer}
@@ -238,7 +239,11 @@ def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.3
     - exact leaf match (case-insensitive), or
     - substring either way (header in leaf or leaf in header), or
     - Jaccard token overlap >= min_overlap (default 0.34).
-    - ALWAYS RETURN an output - never have any empty headers!
+    - ALWAYS RETURN an output - never have any empty headers
+    - Avoid generic technical/container words such as: components, schemas, properties, paths, tags, servers, definitions, refs.
+    - If a candidate violates these rules, skip it and choose another that fits.
+
+
 
     """
     h = header.strip()

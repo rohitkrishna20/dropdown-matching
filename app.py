@@ -436,6 +436,28 @@ def api_find_fields():
                         pick = [rhs_meta[0].get("leaf")]
 
             headers = pick
+
+            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema"}
+
+            def _valid_header(h: str) -> bool:
+                if not isinstance(h, str) or not h.strip():
+                    return False
+                s = h.strip()
+                if "_" in s or "#" in s:
+                    return False
+                if _norm(s) in _BAD_TERMS:
+                    return False
+                return True
+
+            headers = [h for h in headers if _valid_header(h)]
+
+            # if nothing left, salvage one candidate
+            if not headers:
+                if figma_labels:
+                    headers = [figma_labels[0]]
+                elif rhs_meta:
+                    headers = [rhs_meta[0].get("leaf")]
+            # --- END POST-FILTER ---
         
         # Gate headers by RHS affinity (pattern-only, no hard-coding)
         gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]

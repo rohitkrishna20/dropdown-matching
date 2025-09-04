@@ -474,6 +474,16 @@ def api_find_fields():
         # 🔴 final safety filter against blocklist
         headers = [h for h in headers if _norm(h) not in blocked_norm]
 
+        deduped, seen_tokens = [], []
+        for h in headers:
+            htoks = set(_tokens(h))
+            # skip if this header's tokens overlap strongly with an already chosen header
+            if any(len(htoks & stoks) / max(1, len(htoks | stoks)) > 0.6 for stoks in seen_tokens):
+                continue
+            deduped.append(h)
+            seen_tokens.append(htoks)
+        headers = deduped
+
         # --- TOP-UP TO 8 HEADERS (non-invasive) ---
         if len(headers) < 8:
             # rank remaining figma labels by (affinity first, then shape)

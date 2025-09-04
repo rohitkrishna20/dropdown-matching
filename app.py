@@ -87,6 +87,32 @@ def _is_headerish(s: str) -> bool:
     if not any(c.isalpha() for c in s): return False
     return True
 
+ID_BASE62 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+def _looks_like_hex_id(s: str) -> bool:
+    w = s.strip()
+    return bool(re.fullmatch(r"[0-9a-fA-F]{10,}", w))  # e.g., 683f60c962e2...
+
+def _looks_like_base62_id(s: str) -> bool:
+    w = s.strip()
+    # long, mostly base62-ish, no spaces -> likely a node/id
+    return len(w) >= 10 and " " not in w and all(c in ID_BASE62 for c in w)
+
+def _valid_figma_label(t: str) -> bool:
+    if not isinstance(t, str): return False
+    s = t.strip()
+    if not s: return False
+    # drop obvious IDs / codes / refs
+    if _looks_like_hex_id(s) or _looks_like_base62_id(s): return False
+    # shape constraints for column headers
+    if "_" in s or "#" in s: return False
+    if "-" in s: return False                           # avoids “Dashboard - My Opportunities”
+    if any(ch.isdigit() for ch in s): return False      # drop “Q3 2024”, etc.
+    if len(s) > 24: return False                        # too long for a column header
+    if len(s.split()) > 3: return False                 # very long phrases
+    return _is_headerish(s)
+
+
 
 
 def build_blocklist() -> set:
@@ -355,6 +381,8 @@ def api_find_fields():
 
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
+        figma_labels = [t for t in figma_labels if _valid_figma_label(t)]
+
                 # --- EMERGENCY FIGMA FALLBACK: if TEXT-node harvest is empty, sweep all strings ---
         if not figma_labels:
             def _harvest_strings(node, bag):
@@ -475,8 +503,9 @@ def api_find_fields():
                         nv = _norm(v)
                         if nv in norm_fig:
                             cand = norm_fig[nv]
-                            if _valid_header(cand):
+                            if _valid_figma_label(cand):
                                 headers.append(cand)
+
 
         # Fallback (figma-only): rank figma labels by (affinity first, then shape)
         if not headers:
@@ -563,15 +592,17 @@ def api_find_fields():
         # de-dup, final figma-only validity + blocklist
         # ------------- consolidate, ensure 8 figma-only headers -------------
 # keep only valid, non-blocked, dedup
+        # ------------- consolidate, ensure 8 figma-only headers -------------
+        # keep only valid, non-blocked, de-dup
         seen = set()
         headers = [h for h in (gated if 'gated' in locals() else headers)
                    if _valid_figma_label(h) and _norm(h) not in blocked_norm and not (h in seen or seen.add(h))]
-        
+
         # root-word dedupe to avoid many "Account ...", "Opportunity ..." variants
         def _bucket_key(h: str) -> str:
             toks = _tokens(h)
             return toks[0] if toks else _norm(h)
-        
+
         kept_roots, deduped = set(), []
         for h in headers:
             r = _bucket_key(h)
@@ -580,7 +611,7 @@ def api_find_fields():
             kept_roots.add(r)
             deduped.append(h)
         headers = deduped
-        
+
         # If we have fewer than 8, top up strictly from remaining FIGMA labels (no RHS sourcing)
         def _shape_score(s: str) -> float:
             parts = s.strip().split()
@@ -589,14 +620,17 @@ def api_find_fields():
             shout = 1.0 if _is_mostly_upper(s) else 0.0
             # lower is better
             return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
-        
+
         if len(headers) < 8:
             # candidate pool: figma-only, valid, not blocked, not already chosen
             pool = [x for x in figma_labels
                     if x not in headers and _valid_figma_label(x) and _norm(x) not in blocked_norm]
-        
+
             # (a) prefer weak RHS-affinity first (helps quality but doesn't block us)
-            pool_aff = sorted(pool, key=lambda x: (0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.10) else 1, _shape_score(x)))
+            pool_aff = sorted(pool, key=lambda x: (
+                0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.10) else 1,
+                _shape_score(x)
+            ))
             for x in pool_aff:
                 r = _bucket_key(x)
                 if r in kept_roots:
@@ -605,7 +639,7 @@ def api_find_fields():
                 kept_roots.add(r)
                 if len(headers) >= 8:
                     break
-        
+
             # (b) still short? fill purely by shape (still figma-only & new root words)
             if len(headers) < 8:
                 pool_shape = sorted([x for x in pool if _bucket_key(x) not in kept_roots], key=_shape_score)
@@ -614,14 +648,16 @@ def api_find_fields():
                     kept_roots.add(_bucket_key(x))
                     if len(headers) >= 8:
                         break
-        
+
         # absolute last resort: if still empty, pick up to 8 best-shaped figma labels
         if not headers:
-            fallback = sorted(figma_labels, key=_shape_score)[:8]
-            headers = fallback
-        
+            fallback = sorted(figma_labels, key=_shape_score)
+            headers = [x for x in fallback if _valid_figma_label(x)][:8]
+
         # keep global cap
         headers = headers[:15]
+        # ------------- end ensure 8 -------------
+
 # ------------- end ensure 8 -------------
 
         # -------- end Figma-only header selection --------------------------------

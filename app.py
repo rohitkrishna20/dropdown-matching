@@ -57,35 +57,28 @@ def _is_mostly_numeric(s: str) -> bool:
     return digits / max(1, len(s)) >= 0.4
 
 def _looks_like_id(s: str) -> bool:
-    """Reject long, no-space, mostly-alnum tokens that look like IDs/keys."""
-    if not isinstance(s, str): 
+    if not isinstance(s, str):
         return False
     t = s.strip()
-    if not t: 
+    if not t:
         return False
-    # no spaces and reasonably long
     if " " not in t and len(t) >= 8:
         alnum_ratio = sum(c.isalnum() for c in t) / len(t)
         if alnum_ratio >= 0.9 and any(c.isdigit() for c in t):
             return True
-    # hex-only or base62-ish stubs
     if re.fullmatch(r"[A-Fa-f0-9]{8,}", t):
         return True
     if re.fullmatch(r"[A-Za-z0-9_-]{12,}", t):
         return True
     return False
 
-
 def _is_headerish(s: str) -> bool:
     if not isinstance(s, str): return False
     w = s.strip()
     if not w: return False
-    # NEW: kill obvious IDs
     if _looks_like_id(w): return False
-    # NEW: drop if contains digits or forbidden chars
     if any(ch.isdigit() for ch in w): return False
     if "_" in w or "#" in w: return False
-
     parts = w.split()
     if not (1 <= len(parts) <= 3): return False
     if any(len(p) > 28 for p in parts): return False
@@ -93,6 +86,7 @@ def _is_headerish(s: str) -> bool:
     if _is_mostly_numeric(s): return False
     if not any(c.isalpha() for c in s): return False
     return True
+
 
 
 def build_blocklist() -> set:
@@ -405,19 +399,20 @@ def api_find_fields():
         figma_labels = [lbl for lbl in figma_labels if _norm(lbl) not in blocked_norm]
         
         # Final figma-only validity screen (no digits, no _, no #, no IDs)
+                # -------- Figma-only header selection (always return 8 best) --------
+        # 1) Filter figma labels (no IDs, no digits, no "_" or "#")
         def _valid_figma_label(t: str) -> bool:
-            if not isinstance(t, str) or not t.strip(): 
+            if not isinstance(t, str) or not t.strip():
                 return False
-            if _looks_like_id(t): 
+            if _looks_like_id(t):
                 return False
-            if any(ch.isdigit() for ch in t): 
+            if any(ch.isdigit() for ch in t):
                 return False
-            if "_" in t or "#" in t: 
+            if "_" in t or "#" in t:
                 return False
             return _is_headerish(t)
-        
-        figma_labels = [t for t in figma_labels if _valid_figma_label(t)]
 
+        figma_labels = [t for t in figma_labels if _valid_figma_label(t)]
 
         # Helper filters (keep these figma-only)
         _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
@@ -484,9 +479,9 @@ def api_find_fields():
 
             pick, seen_local = [], set()
             for x in fig_sorted:
-                if _norm(x) in blocked_norm: 
+                if _norm(x) in blocked_norm:
                     continue
-                if x in seen_local: 
+                if x in seen_local:
                     continue
                 seen_local.add(x)
                 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
@@ -498,7 +493,7 @@ def api_find_fields():
             if len(pick) < 8:
                 # first, allow weaker affinity
                 for x in fig_sorted:
-                    if x in pick: 
+                    if x in pick:
                         continue
                     if has_rhs_affinity(x, rhs_meta, min_overlap=0.10):
                         pick.append(x)
@@ -508,7 +503,7 @@ def api_find_fields():
             if len(pick) < 8:
                 # finally, fill by best shape only (still figma-only, valid, not blocked)
                 for x in fig_sorted:
-                    if x in pick: 
+                    if x in pick:
                         continue
                     pick.append(x)
                     if len(pick) >= 8:
@@ -516,7 +511,6 @@ def api_find_fields():
 
             # If still nothing (extreme edge), salvage 1 figma label
             if not pick and figma_labels:
-                # take first valid figma label or just the first
                 pick = [next((z for z in figma_labels if _valid_header(z)), figma_labels[0])]
 
             headers = pick
@@ -552,7 +546,6 @@ def api_find_fields():
         headers = [h for h in gated if _valid_header(h) and _norm(h) not in blocked_norm and not (h in seen or seen.add(h))]
 
         # ensure at least 8 (last tiny safety)
-                # ensure at least 8 (last tiny safety)
         if len(headers) < 8:
             for x in figma_labels:
                 if _valid_header(x) and x not in headers and _norm(x) not in blocked_norm:
@@ -601,11 +594,10 @@ def api_find_fields():
                     kept_roots.add(r)
                     if len(headers) >= 8:
                         break
-        # --- END ROOT-WORD DEDUPE ---
-
 
         # keep global cap
         headers = headers[:15]
+        # -------- end Figma-only header selection --------------------------------
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}

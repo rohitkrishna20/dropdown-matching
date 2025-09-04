@@ -555,8 +555,6 @@ def api_find_fields():
         if not headers:
             if figma_labels:
                 headers = [figma_labels[0]]
-            elif rhs_meta:
-                headers = [rhs_meta[0].get("leaf")]
         
         # --- FINAL TOP-UP TO 8 (non-invasive, respects rules) ---
         if len(headers) < 8:

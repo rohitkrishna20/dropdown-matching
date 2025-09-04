@@ -117,8 +117,8 @@ def get_payload(req):
 # ============== Figma extraction (TEXT nodes only) ==============
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
-    Collect ONLY text from nodes with type == 'TEXT' (characters).
-    No 'name' keys or component metadata. Then keep only header-ish shapes.
+    Collect text from TEXT nodes that are descendants of an INSTANCE or FRAME.
+    No hard-coded header names; just structural + shape-based filtering.
     """
     out = []
 
@@ -126,28 +126,58 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
         return cleaned.replace(".", "").isdigit()
 
-    def walk(node):
+    def is_headerish(s: str) -> bool:
+        if not isinstance(s, str): return False
+        w = s.strip()
+        if not w: return False
+        # short human-like phrase (1–3 words), contains a letter, not shouty, not mostly numbers
+        parts = w.split()
+        if not (1 <= len(parts) <= 3): return False
+        if not any(c.isalpha() for c in w): return False
+        letters = [c for c in w if c.isalpha()]
+        if letters:
+            upp = sum(c.isupper() for c in letters)
+            if upp / len(letters) >= 0.8 and len(letters) >= 4:
+                return False
+        digits = sum(c.isdigit() for c in w)
+        if digits / max(1, len(w)) >= 0.4: return False
+        return True
+
+    TARGET_CONTAINERS = {"INSTANCE", "FRAME"}  # structure-only, no label hardcoding
+
+    def walk(node, in_container: bool):
         if isinstance(node, dict):
-            if node.get("type") == "TEXT":
+            node_type = node.get("type")
+            # entering a container switches flag on (sticky for its subtree)
+            now_in = in_container or (node_type in TARGET_CONTAINERS)
+
+            # collect TEXT only when we're inside a target container
+            if now_in and node_type == "TEXT":
                 val = node.get("characters", "")
                 if isinstance(val, str):
                     s = val.strip()
-                    if s and not is_numeric(s) and _is_headerish(s):
+                    if s and not is_numeric(s) and is_headerish(s):
                         out.append(s)
+
+            # recurse
             for v in node.values():
                 if isinstance(v, (dict, list)):
-                    walk(v)
+                    walk(v, now_in)
+
         elif isinstance(node, list):
             for item in node:
-                walk(item)
+                walk(item, in_container)
 
-    walk(figma_json)
-    # de-dup preserve order
+    walk(figma_json, in_container=False)
+
+    # de-dup while preserving order
     seen, uniq = set(), []
     for s in out:
         if s not in seen:
-            seen.add(s); uniq.append(s)
+            seen.add(s)
+            uniq.append(s)
     return uniq
+
 
 # ============== RHS field universe (generic) ==============
 def extract_all_keys(data, prefix=""):

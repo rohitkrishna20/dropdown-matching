@@ -598,6 +598,68 @@ def api_find_fields():
         # keep global cap
         headers = headers[:15]
         # -------- end Figma-only header selection --------------------------------
+                # -------- FINAL GUARANTEE: if still empty, take top 8 from figma_json --------
+        if not headers:
+            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
+
+            def _valid_figma_label_local(t: str) -> bool:
+                if not isinstance(t, str) or not t.strip():
+                    return False
+                s = t.strip()
+                if any(ch.isdigit() for ch in s):
+                    return False
+                if "_" in s or "#" in s:
+                    return False
+                if _norm(s) in _BAD_TERMS:
+                    return False
+                return _is_headerish(s)
+
+            def _pure_figma_score(s: str) -> float:
+                """Lower is better: short, 1–2 words, more alpha, not shouty."""
+                s2 = s.strip()
+                parts = s2.split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s2)
+                shout = 1.0 if _is_mostly_upper(s2) else 0.0
+                # slight bonus for 1–2 words
+                word_bonus = -0.75 if 1 <= len(parts) <= 2 else 0.0
+                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha + word_bonus
+
+            # candidate pool from figma only
+            pool = [t for t in figma_labels if _valid_figma_label_local(t) and _norm(t) not in blocked_norm]
+
+            # sort by figma-only quality
+            pool_sorted = sorted(pool, key=_pure_figma_score)
+
+            # dedupe by root word while filling up to 8
+            def _bucket_key(h: str) -> str:
+                toks = _tokens(h)
+                return toks[0] if toks else _norm(h)
+
+            headers = []
+            seen_roots = set()
+            for cand in pool_sorted:
+                r = _bucket_key(cand)
+                if r in seen_roots:
+                    continue
+                seen_roots.add(r)
+                headers.append(cand)
+                if len(headers) >= 8:
+                    break
+
+            # if still short, fill without root dedupe
+            if len(headers) < 8:
+                for cand in pool_sorted:
+                    if cand in headers:
+                        continue
+                    headers.append(cand)
+                    if len(headers) >= 8:
+                        break
+
+            # absolute last-resort: any strings we can find in figma
+            if not headers and figma_labels:
+                headers = figma_labels[:8]
+        # -------- END FINAL GUARANTEE --------
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}

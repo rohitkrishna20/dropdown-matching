@@ -372,10 +372,61 @@ def api_find_fields():
 
         # Fallback: take top header-ish figma labels if LLM produced nothing
         if not headers:
-            if figma_labels:
-                headers = [figma_labels[0]]
-            elif rhs_meta:
-                headers = [rhs_meta[0]["leaf"]]
+            # rank figma labels by (affinity first, then shape)
+            def _shape_score(s: str) -> float:
+                parts = s.strip().split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s)
+                shout = 1.0 if _is_mostly_upper(s) else 0.0
+                # lower is better
+                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
+
+            fig_sorted = sorted(
+                figma_labels,
+                key=lambda x: (
+                    0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
+                    _shape_score(x)
+                )
+            )
+
+            pick, seen_local = [], set()
+            for x in fig_sorted:
+                if _norm(x) in blocked_norm: 
+                    continue
+                if x in seen_local: 
+                    continue
+                seen_local.add(x)
+                if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
+                    pick.append(x)
+                if len(pick) >= 8:
+                    break
+
+            # If still nothing, backstop to RHS leaves (up to 8 distinct)
+            if not pick:
+                leaves, seen_leaf = [], set()
+                for m in rhs_meta:
+                    leaf = m.get("leaf") or ""
+                    if not leaf: 
+                        continue
+                    if _norm(leaf) in blocked_norm: 
+                        continue
+                    if leaf in seen_leaf: 
+                        continue
+                    seen_leaf.add(leaf)
+                    leaves.append(leaf)
+                    if len(leaves) >= 8:
+                        break
+
+                if leaves:
+                    pick = leaves
+                else:
+                    # absolute last resort: 1 item from figma or rhs_meta
+                    if figma_labels:
+                        pick = [figma_labels[0]]
+                    elif rhs_meta:
+                        pick = [rhs_meta[0].get("leaf")]
+
+            headers = pick
         
         # Gate headers by RHS affinity (pattern-only, no hard-coding)
         gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]

@@ -333,18 +333,31 @@ def api_find_fields():
         figma_json = force_decode(raw["figma_json"])
         data_json  = force_decode(raw["data_json"])
 
-        # Build RHS universe (paths + leaves) and FAISS over leaves
+        # Build RHS universe (paths + leaves) and FAISS over leaves (for ranking/matching only)
         rhs_meta = collect_rhs_paths_and_leaves(data_json)
         field_index = build_faiss_on_leaves(rhs_meta)
 
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
 
-        # 🔴 NEW: drop labels previously marked incorrect (candidate filter)
+        # Drop labels previously marked incorrect (candidate filter)
         blocked_norm = build_blocklist()
         figma_labels = [lbl for lbl in figma_labels if _norm(lbl) not in blocked_norm]
 
-        # LLM selection from candidate labels (unchanged style)
+        # Helper filters (keep these figma-only)
+        _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
+
+        def _valid_header(s: str) -> bool:
+            if not isinstance(s, str) or not s.strip():
+                return False
+            t = s.strip()
+            if "_" in t or "#" in t:
+                return False
+            if _norm(t) in _BAD_TERMS:
+                return False
+            return True
+
+        # LLM selection from candidate labels (STRICTLY from figma_labels)
         headers = []
         if figma_labels:
             prompt = make_prompt_from_figma(figma_labels)
@@ -353,6 +366,7 @@ def api_find_fields():
                 content = (out.get("message") or {}).get("content", "") or ""
             except Exception:
                 content = ""
+
             parsed = {}
             if content:
                 try:
@@ -360,8 +374,10 @@ def api_find_fields():
                 except Exception:
                     m = re.search(r"\{[\s\S]*?\}", content)
                     if m:
-                        try: parsed = json.loads(m.group())
-                        except Exception: parsed = {}
+                        try:
+                            parsed = json.loads(m.group())
+                        except Exception:
+                            parsed = {}
 
             if isinstance(parsed, dict):
                 norm_fig = {_norm(x): x for x in figma_labels}
@@ -369,11 +385,12 @@ def api_find_fields():
                     if isinstance(v, str):
                         nv = _norm(v)
                         if nv in norm_fig:
-                            headers.append(norm_fig[nv])
+                            cand = norm_fig[nv]
+                            if _valid_header(cand):
+                                headers.append(cand)
 
-        # Fallback: take top header-ish figma labels if LLM produced nothing
+        # Fallback (figma-only): rank figma labels by (affinity first, then shape)
         if not headers:
-            # rank figma labels by (affinity first, then shape)
             def _shape_score(s: str) -> float:
                 parts = s.strip().split()
                 L = sum(len(p) for p in parts)
@@ -383,7 +400,7 @@ def api_find_fields():
                 return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
 
             fig_sorted = sorted(
-                figma_labels,
+                (x for x in figma_labels if _valid_header(x)),
                 key=lambda x: (
                     0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
                     _shape_score(x)
@@ -402,209 +419,118 @@ def api_find_fields():
                 if len(pick) >= 8:
                     break
 
-            # If still nothing, backstop to RHS leaves (up to 8 distinct)
-            if not pick:
-    # take best 8 by shape only from figma (still respect blocklist)
-                def _shape_only(s: str) -> float:
+            # If affinity didn’t yield 8 yet, top up from remaining FIGMA labels (no RHS sourcing)
+            if len(pick) < 8:
+                # first, allow weaker affinity
+                for x in fig_sorted:
+                    if x in pick: 
+                        continue
+                    if has_rhs_affinity(x, rhs_meta, min_overlap=0.10):
+                        pick.append(x)
+                    if len(pick) >= 8:
+                        break
+
+            if len(pick) < 8:
+                # finally, fill by best shape only (still figma-only, valid, not blocked)
+                for x in fig_sorted:
+                    if x in pick: 
+                        continue
+                    pick.append(x)
+                    if len(pick) >= 8:
+                        break
+
+            # If still nothing (extreme edge), salvage 1 figma label
+            if not pick and figma_labels:
+                # take first valid figma label or just the first
+                pick = [next((z for z in figma_labels if _valid_header(z)), figma_labels[0])]
+
+            headers = pick
+
+        # Gate headers by RHS affinity (keep quality) but do not let it drop below 8
+        gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]
+        if len(gated) < 8:
+            # relax gating using remaining figma-only candidates
+            remaining = [x for x in figma_labels if x not in gated and _valid_header(x)]
+            # prefer weak affinity first
+            weak_aff = [x for x in remaining if has_rhs_affinity(x, rhs_meta, min_overlap=0.10)]
+            for x in weak_aff:
+                if x not in gated:
+                    gated.append(x)
+                if len(gated) >= 8:
+                    break
+            # then shape-only if needed
+            if len(gated) < 8:
+                def _shape_score2(s: str) -> float:
                     parts = s.strip().split()
                     L = sum(len(p) for p in parts)
                     alpha = sum(c.isalpha() for c in s)
                     shout = 1.0 if _is_mostly_upper(s) else 0.0
                     return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
-            
-                fig_only_sorted = sorted(
-                    [x for x in figma_labels if _norm(x) not in blocked_norm],
-                    key=_shape_only
-                )
-                pick = fig_only_sorted[:8] if fig_only_sorted else []
-                if not pick and figma_labels:
-                    # absolute last resort: 1 item from figma
-                    pick = [figma_labels[0]]
+                for x in sorted(remaining, key=_shape_score2):
+                    if x not in gated:
+                        gated.append(x)
+                    if len(gated) >= 8:
+                        break
 
-            headers = pick
-
-            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema"}
-
-            def _valid_header(h: str) -> bool:
-                if not isinstance(h, str) or not h.strip():
-                    return False
-                s = h.strip()
-                if "_" in s or "#" in s:
-                    return False
-                if _norm(s) in _BAD_TERMS:
-                    return False
-                return True
-
-            headers = [h for h in headers if _valid_header(h)]
-
-            # if nothing left, salvage one candidate
-            if not headers:
-                if figma_labels:
-                    headers = [figma_labels[0]]
-            # --- END POST-FILTER ---
-        
-        # Gate headers by RHS affinity (pattern-only, no hard-coding)
-        gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]
-        # If gating removed too many, keep best few by shape score
-        if not gated:
-            # crude shape score: shorter + more alpha + not shouty
-            def shape_score(s: str) -> float:
-                parts = s.strip().split()
-                L = sum(len(p) for p in parts)
-                alpha = sum(c.isalpha() for c in s)
-                shout = 1.0 if _is_mostly_upper(s) else 0.0
-                return L - 2.0*shout - 0.5*abs(len(parts)-2)
-            figma_sorted = sorted(headers, key=lambda x: shape_score(x))
-            # keep any with even weak affinity threshold
-            weak = [h for h in figma_sorted if has_rhs_affinity(h, rhs_meta, min_overlap=0.2)]
-            gated = weak[:10] if weak else figma_sorted[:5]
-
-        # de-dup, cap
+        # de-dup, final figma-only validity + blocklist
         seen = set()
-        headers = [h for h in gated if not (h in seen or seen.add(h))]
+        headers = [h for h in gated if _valid_header(h) and _norm(h) not in blocked_norm and not (h in seen or seen.add(h))]
 
-        # 🔴 final safety filter against blocklist
-        headers = [h for h in headers if _norm(h) not in blocked_norm]
+        # ensure at least 8 (last tiny safety)
+                # ensure at least 8 (last tiny safety)
+        if len(headers) < 8:
+            for x in figma_labels:
+                if _valid_header(x) and x not in headers and _norm(x) not in blocked_norm:
+                    headers.append(x)
+                if len(headers) >= 8:
+                    break
 
-        deduped, seen_tokens = [], []
+        # --- ROOT-WORD DEDUPE (avoid many "Account*" etc.) ---
+        def _bucket_key(h: str) -> str:
+            toks = _tokens(h)
+            return toks[0] if toks else _norm(h)
+
+        kept_roots, deduped = set(), []
         for h in headers:
-            htoks = set(_tokens(h))
-            # skip if this header's tokens overlap strongly with an already chosen header
-            if any(len(htoks & stoks) / max(1, len(htoks | stoks)) > 0.6 for stoks in seen_tokens):
+            root = _bucket_key(h)
+            if root in kept_roots:
                 continue
+            kept_roots.add(root)
             deduped.append(h)
-            seen_tokens.append(htoks)
         headers = deduped
 
-        # --- TOP-UP TO 8 HEADERS (non-invasive) ---
+        # If dedupe dropped us below 8, top back up with new-root FIGMA labels
         if len(headers) < 8:
-            # rank remaining figma labels by (affinity first, then shape)
-            def _shape_score2(s: str) -> float:
-                parts = s.strip().split()
-                L = sum(len(p) for p in parts)
-                alpha = sum(c.isalpha() for c in s)
-                shout = 1.0 if _is_mostly_upper(s) else 0.0
-                # lower is better
-                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
-
-            # candidates not already chosen, not blocked
+            # candidate pool: figma-only, valid, not blocked, not already chosen
             pool = [
                 x for x in figma_labels
-                if x not in headers and _norm(x) not in blocked_norm
+                if x not in headers and _valid_header(x) and _norm(x) not in blocked_norm
             ]
-
-            pool_sorted = sorted(
-                pool,
-                key=lambda x: (
-                    0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
-                    _shape_score2(x)
-                )
-            )
-
-            for x in pool_sorted:
-                if x in headers:
+            # prefer weak-affinity first (min_overlap=0.10), but only if it introduces a new root
+            for x in pool:
+                r = _bucket_key(x)
+                if r in kept_roots:
                     continue
-                # require at least weak RHS affinity
-                if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
+                if has_rhs_affinity(x, rhs_meta, min_overlap=0.10):
                     headers.append(x)
+                    kept_roots.add(r)
                 if len(headers) >= 8:
                     break
-
-            # If still short, backstop from RHS leaves (distinct, non-empty)
+            # still short? fill by shape (still figma-only, new roots)
             if len(headers) < 8:
-                seen_now = set(_norm(h) for h in headers)
-                rest = [
-                    x for x in figma_labels
-                    if _norm(x) not in seen_now and _norm(x) not in blocked_norm
-                ]
-            
-                # prefer ones with any RHS affinity (but still figma-origin)
-                rest_sorted = sorted(
-                    rest,
-                    key=lambda x: (0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
-                                   # light shape nudge
-                                   len(x))
-                )
-                for x in rest_sorted:
-                    if _norm(x) in seen_now:
+                for x in pool:
+                    r = _bucket_key(x)
+                    if r in kept_roots:
                         continue
                     headers.append(x)
-                    seen_now.add(_norm(x))
+                    kept_roots.add(r)
                     if len(headers) >= 8:
                         break
-                    # --- END TOP-UP ---
+        # --- END ROOT-WORD DEDUPE ---
+
 
         # keep global cap
         headers = headers[:15]
-
-        _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema"}
-        
-        def _valid_header_final(h: str) -> bool:
-            if not isinstance(h, str) or not h.strip():
-                return False
-            s = h.strip()
-            if "_" in s or "#" in s:
-                return False
-            if _norm(s) in _BAD_TERMS:
-                return False
-            return True
-        
-        headers = [h for h in headers if _valid_header_final(h)]
-        
-        # If somehow nothing remains, salvage 1 candidate
-        if not headers:
-            if figma_labels:
-                headers = [figma_labels[0]]
-        
-        # --- FINAL TOP-UP TO 8 (non-invasive, respects rules) ---
-        if len(headers) < 8:
-            def _shape_score3(s: str) -> float:
-                parts = s.strip().split()
-                L = sum(len(p) for p in parts)
-                alpha = sum(c.isalpha() for c in s)
-                shout = 1.0 if _is_mostly_upper(s) else 0.0
-                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
-        
-            # Take more from remaining Figma labels first (not blocked, valid, not already chosen)
-            pool = [
-                x for x in figma_labels
-                if x not in headers and _norm(x) not in blocked_norm and _valid_header_final(x)
-            ]
-            pool_sorted = sorted(
-                pool,
-                key=lambda x: (
-                    0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
-                    _shape_score3(x)
-                )
-            )
-            for x in pool_sorted:
-                if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
-                    headers.append(x)
-                if len(headers) >= 8:
-                    break
-        
-            # If still short, backstop from RHS leaves (distinct, valid, not blocked)
-            if len(headers) < 8:
-                seen_leaf = set(_norm(h) for h in headers)
-                for m in rhs_meta:
-                    leaf = (m.get("leaf") or "").strip()
-                    if not leaf:
-                        continue
-                    if _norm(leaf) in blocked_norm:
-                        continue
-                    if _norm(leaf) in seen_leaf:
-                        continue
-                    if not _valid_header_final(leaf):
-                        continue
-                    headers.append(leaf)
-                    seen_leaf.add(_norm(leaf))
-                    if len(headers) >= 8:
-                        break
-        # --- END FINAL TOP-UP ---
-        
-        # keep global cap
-        headers = headers[:15]
-        
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}
@@ -638,6 +564,7 @@ def api_find_fields():
 
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
+
 
 # ============== API: feedback ==============
 @app.post("/api/feedback")

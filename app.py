@@ -301,7 +301,6 @@ def api_ollama_info():
     return jsonify(get_ollama_info())
 
 # ============== API: find_fields ==============
-# ============== API: find_fields ==============
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -314,14 +313,14 @@ def api_find_fields():
         figma_json = force_decode(raw["figma_json"])
         data_json  = force_decode(raw["data_json"])
 
-        # Build RHS universe
+        # Build RHS universe (paths + leaves) and FAISS over leaves
         rhs_meta = collect_rhs_paths_and_leaves(data_json)
         field_index = build_faiss_on_leaves(rhs_meta)
 
-        # Extract labels from Figma
+        # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
 
-        # Ask model to pick headers
+        # LLM selection from candidate labels (unchanged style)
         headers = []
         if figma_labels:
             prompt = make_prompt_from_figma(figma_labels)
@@ -330,7 +329,6 @@ def api_find_fields():
                 content = (out.get("message") or {}).get("content", "") or ""
             except Exception:
                 content = ""
-
             parsed = {}
             if content:
                 try:
@@ -349,23 +347,36 @@ def api_find_fields():
                         if nv in norm_fig:
                             headers.append(norm_fig[nv])
 
-        # fallback if empty
+        # Fallback: take top header-ish figma labels if LLM produced nothing
         if not headers:
             headers = figma_labels[:15]
 
-        # filter out previously marked incorrect
-        headers = [h for h in headers if h not in feedback_memory.get("incorrect", {})]
+        # Gate headers by RHS affinity (pattern-only, no hard-coding)
+        gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]
+        # If gating removed too many, keep best few by shape score
+        if not gated:
+            # crude shape score: shorter + more alpha + not shouty
+            def shape_score(s: str) -> float:
+                parts = s.strip().split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s)
+                shout = 1.0 if _is_mostly_upper(s) else 0.0
+                return L - 2.0*shout - 0.5*abs(len(parts)-2)
+            figma_sorted = sorted(headers, key=lambda x: shape_score(x))
+            # keep any with even weak affinity threshold
+            weak = [h for h in figma_sorted if has_rhs_affinity(h, rhs_meta, min_overlap=0.2)]
+            gated = weak[:10] if weak else figma_sorted[:5]
 
-        # dedup
+        # de-dup, cap
         seen = set()
-        headers = [h for h in headers if not (h in seen or seen.add(h))]
+        headers = [h for h in gated if not (h in seen or seen.add(h))][:15]
 
-        # Match RHS
+        # Build matches (lexical first, FAISS as backstop)
         matches = {}
         for h in headers:
             matches[h] = rank_candidates_for(h, rhs_meta, field_index, k=3)
 
-        # persist
+        # persist context for feedback
         feedback_memory["last_run"] = {}
         for h in headers:
             feedback_memory["correct"].setdefault(h, []).append(h)
@@ -376,11 +387,22 @@ def api_find_fields():
             }
         save_feedback()
 
+        if request.args.get("debug") in {"1","true"}:
+            return jsonify({
+                "headers_extracted": headers,
+                "matches": matches,
+                "debug": {
+                    "figma_label_count": len(figma_labels),
+                    "figma_sample": figma_labels[:25],
+                    "rhs_paths_count": len(rhs_meta),
+                    "rhs_leaf_sample": [m["leaf"] for m in rhs_meta[:25]]
+                }
+            })
+
         return jsonify({"headers_extracted": headers, "matches": matches})
 
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
-
 
 # ============== API: feedback ==============
 @app.post("/api/feedback")
@@ -389,34 +411,35 @@ def api_feedback():
         body = request.get_json(force=True)
         header = body.get("header")
         status = body.get("status")  # "correct" | "incorrect"
-
         if not header or status not in {"correct", "incorrect"}:
             return jsonify({"error": "Invalid feedback format"}), 400
 
-        # mark feedback
+        patterns = feedback_memory["correct"].get(header, [])
+
         if status == "correct":
             feedback_memory["correct"].setdefault(header, [])
-            if header not in feedback_memory["correct"][header]:
-                feedback_memory["correct"][header].append(header)
-            feedback_memory["incorrect"].pop(header, None)
+            for p in patterns:
+                if p not in feedback_memory["correct"][header]:
+                    feedback_memory["correct"][header].append(p)
         else:
             feedback_memory["incorrect"].setdefault(header, [])
-            if header not in feedback_memory["incorrect"][header]:
-                feedback_memory["incorrect"][header].append(header)
+            for p in patterns:
+                if p not in feedback_memory["incorrect"][header]:
+                    feedback_memory["incorrect"][header].append(p)
             feedback_memory["correct"].pop(header, None)
 
-        # context
         ctx = (feedback_memory.get("last_run") or {}).get(header, {})
         matched_ui = ctx.get("matched_ui_label")
         rhs_cands  = ctx.get("top_rhs_candidates", [])
         figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
 
-        # explanation
         explain_prompt = f"""
-Explain briefly (3–5 sentences) why this header was chosen.
+Explain briefly and neutrally (3–5 sentences) how this header could be selected:
+focus on shape (short, human-like phrase), overlap with RHS leaf names, and general similarity.
+
 Header: {header}
 Matched UI label: {matched_ui}
-RHS candidates: {json.dumps(rhs_cands, ensure_ascii=False)}
+Top RHS candidates: {json.dumps(rhs_cands, ensure_ascii=False)}
 Sample UI labels:
 {figma_sample}
 """.strip()
@@ -432,12 +455,12 @@ Sample UI labels:
         return jsonify({
             "header": header,
             "status": status,
+            "patterns_used": patterns,
             "explanation": explanation
         })
 
     except Exception as e:
         return jsonify({"error": "Feedback failed", "details": str(e)}), 500
-
 
 # ============== Root/Runner ==============
 @app.get("/")

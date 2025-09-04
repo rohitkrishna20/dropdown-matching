@@ -599,8 +599,34 @@ def api_find_fields():
         headers = headers[:15]
         # -------- end Figma-only header selection --------------------------------
                 # -------- FINAL GUARANTEE: if still empty, take top 8 from figma_json --------
+               # -------- FINAL GUARANTEE: if still empty, take top 8 from figma_json --------
         if not headers:
             _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
+
+            # If figma_labels is empty, permissively harvest strings from the whole figma JSON
+            if not figma_labels:
+                def _harvest_strings(node, bag):
+                    if isinstance(node, dict):
+                        for v in node.values():
+                            if isinstance(v, str):
+                                sv = v.strip()
+                                if 1 <= len(sv) <= 40:
+                                    bag.append(sv)
+                            elif isinstance(v, (dict, list)):
+                                _harvest_strings(v, bag)
+                    elif isinstance(node, list):
+                        for it in node:
+                            _harvest_strings(it, bag)
+
+                tmp = []
+                _harvest_strings(figma_json, tmp)
+                # de-dup
+                seen_tmp = set()
+                figma_labels = []
+                for s in tmp:
+                    if s and s not in seen_tmp:
+                        seen_tmp.add(s)
+                        figma_labels.append(s)
 
             def _valid_figma_label_local(t: str) -> bool:
                 if not isinstance(t, str) or not t.strip():
@@ -621,14 +647,11 @@ def api_find_fields():
                 L = sum(len(p) for p in parts)
                 alpha = sum(c.isalpha() for c in s2)
                 shout = 1.0 if _is_mostly_upper(s2) else 0.0
-                # slight bonus for 1–2 words
                 word_bonus = -0.75 if 1 <= len(parts) <= 2 else 0.0
                 return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha + word_bonus
 
-            # candidate pool from figma only
+            # candidate pool from (possibly re-built) figma_labels only
             pool = [t for t in figma_labels if _valid_figma_label_local(t) and _norm(t) not in blocked_norm]
-
-            # sort by figma-only quality
             pool_sorted = sorted(pool, key=_pure_figma_score)
 
             # dedupe by root word while filling up to 8
@@ -656,10 +679,11 @@ def api_find_fields():
                     if len(headers) >= 8:
                         break
 
-            # absolute last-resort: any strings we can find in figma
+            # absolute last-resort: any strings we can find in figma (already de-duped above)
             if not headers and figma_labels:
                 headers = figma_labels[:8]
         # -------- END FINAL GUARANTEE --------
+
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}

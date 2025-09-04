@@ -3,12 +3,12 @@ from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
-import json, re, os, requests, ollama, math
+import json, re, os, requests, ollama
 
 app = Flask(__name__)
 
 FEEDBACK_PATH = "feedback_memory.json"
-OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_URL   = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 # ============== persistence ==============
@@ -41,8 +41,8 @@ def _norm(s: str) -> str:
 
 def _tokens(s: str) -> list[str]:
     if not isinstance(s, str): return []
-    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)  # camelCase -> camel Case
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)    # keep alnum separators
+    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)  # camelCase → camel Case
+    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)
     return [t for t in s.strip().lower().split() if t]
 
 def _jaccard(a: set, b: set) -> float:
@@ -64,15 +64,11 @@ def _is_headerish(s: str) -> bool:
     if not isinstance(s, str): return False
     w = s.strip()
     if not w: return False
-    # keep short phrases
     parts = w.split()
     if not (1 <= len(parts) <= 3): return False
-    # avoid very long tokens
     if any(len(p) > 28 for p in parts): return False
-    # avoid shouty tool words and number soup
     if _is_mostly_upper(w): return False
     if _is_mostly_numeric(w): return False
-    # must contain a letter
     if not any(c.isalpha() for c in w): return False
     return True
 
@@ -95,14 +91,13 @@ def get_payload(req):
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
-    # (You can add form/files/raw fallbacks here if you need them again)
     return None
 
 # ============== Figma extraction (TEXT nodes only) ==============
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
     Collect ONLY text from nodes with type == 'TEXT' (characters).
-    No 'name' keys or component metadata. Then keep only header-ish shapes.
+    Then keep only header-ish shapes (short human phrases).
     """
     out = []
 
@@ -149,11 +144,11 @@ def extract_all_keys(data, prefix=""):
 def field_leaf(path: str) -> str:
     """
     Generic leaf: prefer token after last '.properties.'; otherwise last dotted token.
-    Ignore custom extension suffixes like 'x-...'.
+    If leaf starts with 'x-', back up to the previous non 'x-' token if any.
     """
     if not isinstance(path, str) or not path: return ""
     parts = path.split(".")
-    # prefer schema-ish properties
+    leaf = parts[-1]
     try:
         last_prop = max(i for i, t in enumerate(parts) if t == "properties")
         j = last_prop + 1
@@ -161,13 +156,9 @@ def field_leaf(path: str) -> str:
             leaf = parts[j]
             if leaf == "items" and j + 1 < len(parts):
                 leaf = parts[j + 1]
-        else:
-            leaf = parts[-1]
     except ValueError:
-        leaf = parts[-1]
-    # strip extension-like tokens
+        pass
     if leaf.startswith("x-"):
-        # walk back to previous non x- token
         for tok in reversed(parts):
             if not tok.startswith("x-"):
                 leaf = tok
@@ -184,29 +175,49 @@ def collect_rhs_paths_and_leaves(data):
 def build_faiss_on_leaves(rhs_meta):
     docs = []
     for m in rhs_meta:
-        # FAISS over leaf names, but store full path in metadata
         docs.append(Document(page_content=m["leaf"], metadata={"path": m["path"]}))
     return FAISS.from_documents(docs, OllamaEmbeddings(model=OLLAMA_MODEL))
 
-# ============== LLM prompt (minimal change) ==============
+# ============== Blocklist from feedback (NEVER again) ==============
+def build_blocklist() -> set:
+    """
+    Create a normalized set of headers to never output again, based on feedback_memory['incorrect'].
+    Includes both the 'header' keys and any stored patterns for that header.
+    """
+    blocked = set()
+    inc = feedback_memory.get("incorrect", {}) or {}
+    for hdr, patterns in inc.items():
+        blocked.add(_norm(hdr))
+        if isinstance(patterns, list):
+            for p in patterns:
+                if isinstance(p, str):
+                    blocked.add(_norm(p))
+    return blocked
+
+# ============== LLM prompt (generic; with NEVER list) ==============
 def make_prompt_from_figma(labels: list[str]) -> str:
-    """
-    Keep your existing behavior: choose ONLY from provided labels.
-    We do not bias with any hard-coded header lists.
-    """
     blob = "\n".join(f"- {t}" for t in labels)
-    incorrect = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
-    correct   = set(p for pats in feedback_memory["correct"].values()   for p in pats)
-    avoid = ("\nAvoid patterns like:\n" + "\n".join(f"- {p}" for p in incorrect)) if incorrect else ""
-    prefer = ("\nPrefer patterns like:\n" + "\n".join(f"- {p}" for p in correct)) if correct else ""
+
+    incorrect = set(p for pats in (feedback_memory.get("incorrect") or {}).values() for p in pats)
+    correct   = set(p for pats in (feedback_memory.get("correct")   or {}).values() for p in pats)
+    avoid  = ("\nAvoid patterns like:\n" + "\n".join(f"- {p}" for p in incorrect)) if incorrect else ""
+    prefer = ("\nPrefer patterns like:\n" + "\n".join(f"- {p}" for p in correct))   if correct   else ""
+
+    # Build visible NEVER list (only show those that are actually present among candidates)
+    blocked_norm = build_blocklist()
+    never_output = ""
+    if blocked_norm:
+        blocked_in_labels = [t for t in labels if _norm(t) in blocked_norm]
+        if blocked_in_labels:
+            never_output = "\nNEVER output these labels:\n" + "\n".join(f"- {t}" for t in blocked_in_labels)
 
     return f"""
-Extract TABLE COLUMN HEADERS from the candidate label list.
+Extract TABLE COLUMN HEADERS from the candidate label list below.
 - Use ONLY labels that appear in the list (do not invent).
 - Keep them short (1–3 words), human-readable, column-like (not actions/menus/status).
-
 {avoid}
 {prefer}
+{never_output}
 
 Return STRICT JSON: keys = your normalized headers, values = the EXACT matched label.
 
@@ -220,7 +231,7 @@ def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.3
     Keep a header only if it has plausible affinity to at least one RHS leaf:
     - exact leaf match (case-insensitive), or
     - substring either way (header in leaf or leaf in header), or
-    - Jaccard token overlap >= min_overlap (default 0.34).
+    - Jaccard token overlap >= min_overlap.
     """
     h = header.strip()
     htoks = set(_tokens(h))
@@ -286,6 +297,31 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
     out.sort(key=lambda x: x.get("score", 1e9))
     return out[:k]
 
+# ============== Soft FAISS fallback for headers (prevents empty) ==============
+def pick_headers_with_faiss(figma_labels: list[str], field_index, blocked_norm: set, limit: int = 10):
+    """
+    If we couldn't get headers from the model/affinity gating, pick figma labels
+    that are most similar to *any* RHS leaf (via FAISS over leaves). This is model-agnostic:
+    use the best (lowest) distance as the label's score.
+    """
+    scored = []
+    for label in figma_labels:
+        if _norm(label) in blocked_norm:
+            continue
+        try:
+            res = field_index.similarity_search_with_score(label, k=1)
+            if res:
+                _, dist = res[0]
+                scored.append((float(dist), label))
+        except Exception:
+            # If FAISS fails, we just skip scoring for this label
+            continue
+    scored.sort(key=lambda x: x[0])
+    headers = [lbl for _, lbl in scored[:limit]]
+    # final de-dup
+    seen = set()
+    return [h for h in headers if not (h in seen or seen.add(h))]
+
 # ============== Ollama info (unchanged) ==============
 def get_ollama_info():
     try:
@@ -314,13 +350,17 @@ def api_find_fields():
         data_json  = force_decode(raw["data_json"])
 
         # Build RHS universe (paths + leaves) and FAISS over leaves
-        rhs_meta = collect_rhs_paths_and_leaves(data_json)
+        rhs_meta    = collect_rhs_paths_and_leaves(data_json)
         field_index = build_faiss_on_leaves(rhs_meta)
 
         # Figma labels (TEXT nodes only), shape-filtered
-        figma_labels = extract_figma_text(figma_json)
+        figma_labels_all = extract_figma_text(figma_json)
 
-        # LLM selection from candidate labels (unchanged style)
+        # Apply "never again" blocklist to candidate labels
+        blocked_norm = build_blocklist()
+        figma_labels = [t for t in figma_labels_all if _norm(t) not in blocked_norm]
+
+        # LLM selection from candidate labels
         headers = []
         if figma_labels:
             prompt = make_prompt_from_figma(figma_labels)
@@ -344,32 +384,30 @@ def api_find_fields():
                 for _, v in parsed.items():
                     if isinstance(v, str):
                         nv = _norm(v)
-                        if nv in norm_fig:
+                        if nv in norm_fig and nv not in blocked_norm:
                             headers.append(norm_fig[nv])
 
-        # Fallback: take top header-ish figma labels if LLM produced nothing
+        # If model produced nothing usable, take the first few figma labels (still blocklisted)
         if not headers:
-            headers = figma_labels[:15]
+            headers = [s for s in figma_labels][:12]
 
-        # Gate headers by RHS affinity (pattern-only, no hard-coding)
+        # Gate headers by RHS affinity
         gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]
-        # If gating removed too many, keep best few by shape score
-        if not gated:
-            # crude shape score: shorter + more alpha + not shouty
-            def shape_score(s: str) -> float:
-                parts = s.strip().split()
-                L = sum(len(p) for p in parts)
-                alpha = sum(c.isalpha() for c in s)
-                shout = 1.0 if _is_mostly_upper(s) else 0.0
-                return L - 2.0*shout - 0.5*abs(len(parts)-2)
-            figma_sorted = sorted(headers, key=lambda x: shape_score(x))
-            # keep any with even weak affinity threshold
-            weak = [h for h in figma_sorted if has_rhs_affinity(h, rhs_meta, min_overlap=0.2)]
-            gated = weak[:10] if weak else figma_sorted[:5]
 
-        # de-dup, cap
+        # If gating killed everything (Dashboard case), use soft FAISS fallback:
+        # pick figma labels most similar to RHS leaves, then gate lightly again.
+        if not gated:
+            fallback_headers = pick_headers_with_faiss(figma_labels, field_index, blocked_norm, limit=10)
+            # light gating with lower overlap threshold
+            gated = [h for h in fallback_headers if has_rhs_affinity(h, rhs_meta, min_overlap=0.2)]
+
+        # If still empty, keep a tiny set of figma labels (last resort), still respecting blocklist
+        if not gated:
+            gated = figma_labels[:5]
+
+        # De-dup, cap, and apply blocklist once more
         seen = set()
-        headers = [h for h in gated if not (h in seen or seen.add(h))][:15]
+        headers = [h for h in gated if _norm(h) not in blocked_norm and not (h in seen or seen.add(h))][:15]
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}
@@ -382,7 +420,7 @@ def api_find_fields():
             feedback_memory["correct"].setdefault(h, []).append(h)
             feedback_memory["last_run"][h] = {
                 "matched_ui_label": h,
-                "figma_text": figma_labels,
+                "figma_text": figma_labels_all,
                 "top_rhs_candidates": matches.get(h, [])
             }
         save_feedback()
@@ -392,10 +430,11 @@ def api_find_fields():
                 "headers_extracted": headers,
                 "matches": matches,
                 "debug": {
-                    "figma_label_count": len(figma_labels),
-                    "figma_sample": figma_labels[:25],
+                    "figma_label_count": len(figma_labels_all),
+                    "figma_sample": figma_labels_all[:25],
                     "rhs_paths_count": len(rhs_meta),
-                    "rhs_leaf_sample": [m["leaf"] for m in rhs_meta[:25]]
+                    "rhs_leaf_sample": [m["leaf"] for m in rhs_meta[:25]],
+                    "blocked_norm": sorted(list(build_blocklist()))[:25]
                 }
             })
 
@@ -423,6 +462,9 @@ def api_feedback():
                     feedback_memory["correct"][header].append(p)
         else:
             feedback_memory["incorrect"].setdefault(header, [])
+            # record the header itself as a pattern too (helps blocklist)
+            if header not in feedback_memory["incorrect"][header]:
+                feedback_memory["incorrect"][header].append(header)
             for p in patterns:
                 if p not in feedback_memory["incorrect"][header]:
                     feedback_memory["incorrect"][header].append(p)
@@ -435,7 +477,7 @@ def api_feedback():
 
         explain_prompt = f"""
 Explain briefly and neutrally (3–5 sentences) how this header could be selected:
-focus on shape (short, human-like phrase), overlap with RHS leaf names, and general similarity.
+focus on short human phrasing, overlap with RHS leaf names, and general similarity.
 
 Header: {header}
 Matched UI label: {matched_ui}
@@ -467,9 +509,9 @@ Sample UI labels:
 def home():
     return jsonify({
         "message": "POST /api/find_fields with {figma_json, data_json}. "
-                   "Labels come from TEXT nodes only; headers gated by RHS affinity (no hard-coding). "
-                   "Matches are ranked lexically on RHS leaf names with FAISS as backstop. "
-                   "POST /api/feedback with {header, status}. Add ?debug=1 to inspect."
+                   "Headers come from TEXT nodes only; blocklist applied; soft FAISS fallback prevents empty results. "
+                   "POST /api/feedback with {header, status} to store feedback and block future outputs of 'incorrect' headers. "
+                   "GET /api/ollama_info to see Ollama host/models. Add ?debug=1 to inspect."
     })
 
 if __name__ == "__main__":

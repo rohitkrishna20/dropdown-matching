@@ -528,6 +528,27 @@ def api_find_fields():
         # keep global cap
         headers = headers[:15]
 
+        _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema"}
+
+        def _valid_header_final(h: str) -> bool:
+            if not isinstance(h, str) or not h.strip():
+                return False
+            s = h.strip()
+            if "_" in s or "#" in s:
+                return False
+            if _norm(s) in _BAD_TERMS:
+                return False
+            return True
+        
+        headers = [h for h in headers if _valid_header_final(h)]
+        
+        # If somehow nothing remains, salvage 1 candidate
+        if not headers:
+            if figma_labels:
+                headers = [figma_labels[0]]
+            elif rhs_meta:
+                headers = [rhs_meta[0].get("leaf")]
+
         # Build matches (lexical first, FAISS as backstop)
         matches = {}
         for h in headers:

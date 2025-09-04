@@ -529,7 +529,7 @@ def api_find_fields():
         headers = headers[:15]
 
         _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema"}
-
+        
         def _valid_header_final(h: str) -> bool:
             if not isinstance(h, str) or not h.strip():
                 return False
@@ -548,6 +548,56 @@ def api_find_fields():
                 headers = [figma_labels[0]]
             elif rhs_meta:
                 headers = [rhs_meta[0].get("leaf")]
+        
+        # --- FINAL TOP-UP TO 8 (non-invasive, respects rules) ---
+        if len(headers) < 8:
+            def _shape_score3(s: str) -> float:
+                parts = s.strip().split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s)
+                shout = 1.0 if _is_mostly_upper(s) else 0.0
+                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
+        
+            # Take more from remaining Figma labels first (not blocked, valid, not already chosen)
+            pool = [
+                x for x in figma_labels
+                if x not in headers and _norm(x) not in blocked_norm and _valid_header_final(x)
+            ]
+            pool_sorted = sorted(
+                pool,
+                key=lambda x: (
+                    0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
+                    _shape_score3(x)
+                )
+            )
+            for x in pool_sorted:
+                if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
+                    headers.append(x)
+                if len(headers) >= 8:
+                    break
+        
+            # If still short, backstop from RHS leaves (distinct, valid, not blocked)
+            if len(headers) < 8:
+                seen_leaf = set(_norm(h) for h in headers)
+                for m in rhs_meta:
+                    leaf = (m.get("leaf") or "").strip()
+                    if not leaf:
+                        continue
+                    if _norm(leaf) in blocked_norm:
+                        continue
+                    if _norm(leaf) in seen_leaf:
+                        continue
+                    if not _valid_header_final(leaf):
+                        continue
+                    headers.append(leaf)
+                    seen_leaf.add(_norm(leaf))
+                    if len(headers) >= 8:
+                        break
+        # --- END FINAL TOP-UP ---
+        
+        # keep global cap
+        headers = headers[:15]
+        
 
         # Build matches (lexical first, FAISS as backstop)
         matches = {}

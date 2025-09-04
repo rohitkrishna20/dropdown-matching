@@ -117,94 +117,66 @@ def get_payload(req):
 # ============== Figma extraction (TEXT nodes only) ==============
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
-    Collect visible-ish labels from a Figma dump without hardcoding:
-    1) Prefer TEXT.characters (true text nodes).
-    2) If that's sparse/absent (e.g., Dashboard-style dumps), fall back to
-       harvesting ANY short human-like strings from anywhere (FRAME/INSTANCE
-       children, nested props, etc.), then filter with shape heuristics.
-
-    Returns a de-duplicated list suitable as candidate column headers.
+    Collect text from TEXT nodes that are descendants of an INSTANCE or FRAME.
+    No hard-coded header names; just structural + shape-based filtering.
     """
-    # ---------- helpers ----------
-    def is_mostly_upper(s: str) -> bool:
-        letters = [c for c in s if c.isalpha()]
-        if not letters: return False
-        upp = sum(c.isupper() for c in letters)
-        return upp / len(letters) >= 0.8 and len(letters) >= 4
+    out = []
 
-    def is_numeric_like(s: str) -> bool:
-        t = s.replace(",", "").replace("%", "").replace("$", "").strip()
-        return t.replace(".", "").isdigit()
+    def is_numeric(t: str) -> bool:
+        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
+        return cleaned.replace(".", "").isdigit()
 
-    def headerish(s: str) -> bool:
+    def is_headerish(s: str) -> bool:
         if not isinstance(s, str): return False
-        s = s.strip()
-        if not s: return False
-        # 1–3 words, contains at least one letter
-        parts = s.split()
+        w = s.strip()
+        if not w: return False
+        # short human-like phrase (1–3 words), contains a letter, not shouty, not mostly numbers
+        parts = w.split()
         if not (1 <= len(parts) <= 3): return False
-        if not any(c.isalpha() for c in s): return False
-        if is_numeric_like(s): return False
-        if is_mostly_upper(s): return False
-        # avoid very long single tokens (likely IDs)
-        if any(len(p) > 28 for p in parts): return False
+        if not any(c.isalpha() for c in w): return False
+        letters = [c for c in w if c.isalpha()]
+        if letters:
+            upp = sum(c.isupper() for c in letters)
+            if upp / len(letters) >= 0.8 and len(letters) >= 4:
+                return False
+        digits = sum(c.isdigit() for c in w)
+        if digits / max(1, len(w)) >= 0.4: return False
         return True
 
-    text_chars: list[str] = []
-    any_strings: list[str] = []
+    TARGET_CONTAINERS = {"INSTANCE", "FRAME"}  # structure-only, no label hardcoding
 
-    # ---------- walk everything ----------
-    def walk(node):
+    def walk(node, in_container: bool):
         if isinstance(node, dict):
-            # true TEXT nodes
-            if node.get("type") == "TEXT":
+            node_type = node.get("type")
+            # entering a container switches flag on (sticky for its subtree)
+            now_in = in_container or (node_type in TARGET_CONTAINERS)
+
+            # collect TEXT only when we're inside a target container
+            if now_in and node_type == "TEXT":
                 val = node.get("characters", "")
                 if isinstance(val, str):
-                    txt = val.strip()
-                    if txt:
-                        text_chars.append(txt)
+                    s = val.strip()
+                    if s and not is_numeric(s) and is_headerish(s):
+                        out.append(s)
 
-            # collect ANY string values for fallback
-            for k, v in node.items():
-                if isinstance(v, str):
-                    sv = v.strip()
-                    # quick gate: keep shortish strings; we'll filter later
-                    if 1 <= len(sv) <= 40:
-                        any_strings.append(sv)
-
-            # recurse into all children-like fields and any nested structures
+            # recurse
             for v in node.values():
                 if isinstance(v, (dict, list)):
-                    walk(v)
+                    walk(v, now_in)
 
         elif isinstance(node, list):
             for item in node:
-                walk(item)
+                walk(item, in_container)
 
-    walk(figma_json)
+    walk(figma_json, in_container=False)
 
-    # ---------- primary: TEXT.characters ----------
-    prim = [s for s in text_chars if headerish(s)]
-
-    # ---------- fallback: generic strings if primary too sparse ----------
-    if len(prim) < 3:  # threshold can be 0–3; small keeps “prefer TEXT” behavior
-        cand = [s for s in any_strings if headerish(s)]
-        # de-dup while preserving order
-        seen, uniq = set(), []
-        for s in cand:
-            if s not in seen:
-                seen.add(s); uniq.append(s)
-        # prefer distinct tokens (strip likely UI noise by frequency)
-        prim = uniq
-
-    # final de-dup
-    seen, out = set(), []
-    for s in prim:
+    # de-dup while preserving order
+    seen, uniq = set(), []
+    for s in out:
         if s not in seen:
             seen.add(s)
-            out.append(s)
-    return out
-
+            uniq.append(s)
+    return uniq
 
 
 # ============== RHS field universe (generic) ==============
@@ -393,9 +365,6 @@ def api_find_fields():
 
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
-
-        if not figma_labels:
-            return jsonify({"headers_extracted": [], "matches": {}, "note": "No header-like text found in Figma JSON."})
 
         # 🔴 NEW: drop labels previously marked incorrect (candidate filter)
         blocked_norm = build_blocklist()

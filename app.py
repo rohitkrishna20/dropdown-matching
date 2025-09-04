@@ -404,28 +404,22 @@ def api_find_fields():
 
             # If still nothing, backstop to RHS leaves (up to 8 distinct)
             if not pick:
-                leaves, seen_leaf = [], set()
-                for m in rhs_meta:
-                    leaf = m.get("leaf") or ""
-                    if not leaf: 
-                        continue
-                    if _norm(leaf) in blocked_norm: 
-                        continue
-                    if leaf in seen_leaf: 
-                        continue
-                    seen_leaf.add(leaf)
-                    leaves.append(leaf)
-                    if len(leaves) >= 8:
-                        break
-
-                if leaves:
-                    pick = leaves
-                else:
-                    # absolute last resort: 1 item from figma or rhs_meta
-                    if figma_labels:
-                        pick = [figma_labels[0]]
-                    elif rhs_meta:
-                        pick = [rhs_meta[0].get("leaf")]
+    # take best 8 by shape only from figma (still respect blocklist)
+                def _shape_only(s: str) -> float:
+                    parts = s.strip().split()
+                    L = sum(len(p) for p in parts)
+                    alpha = sum(c.isalpha() for c in s)
+                    shout = 1.0 if _is_mostly_upper(s) else 0.0
+                    return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
+            
+                fig_only_sorted = sorted(
+                    [x for x in figma_labels if _norm(x) not in blocked_norm],
+                    key=_shape_only
+                )
+                pick = fig_only_sorted[:8] if fig_only_sorted else []
+                if not pick and figma_labels:
+                    # absolute last resort: 1 item from figma
+                    pick = [figma_labels[0]]
 
             headers = pick
 
@@ -447,8 +441,6 @@ def api_find_fields():
             if not headers:
                 if figma_labels:
                     headers = [figma_labels[0]]
-                elif rhs_meta:
-                    headers = [rhs_meta[0].get("leaf")]
             # --- END POST-FILTER ---
         
         # Gate headers by RHS affinity (pattern-only, no hard-coding)
@@ -520,20 +512,27 @@ def api_find_fields():
 
             # If still short, backstop from RHS leaves (distinct, non-empty)
             if len(headers) < 8:
-                seen_leaf = set(_norm(h) for h in headers)
-                for m in rhs_meta:
-                    leaf = (m.get("leaf") or "").strip()
-                    if not leaf:
+                seen_now = set(_norm(h) for h in headers)
+                rest = [
+                    x for x in figma_labels
+                    if _norm(x) not in seen_now and _norm(x) not in blocked_norm
+                ]
+            
+                # prefer ones with any RHS affinity (but still figma-origin)
+                rest_sorted = sorted(
+                    rest,
+                    key=lambda x: (0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
+                                   # light shape nudge
+                                   len(x))
+                )
+                for x in rest_sorted:
+                    if _norm(x) in seen_now:
                         continue
-                    if _norm(leaf) in blocked_norm:
-                        continue
-                    if _norm(leaf) in seen_leaf:
-                        continue
-                    headers.append(leaf)
-                    seen_leaf.add(_norm(leaf))
+                    headers.append(x)
+                    seen_now.add(_norm(x))
                     if len(headers) >= 8:
                         break
-        # --- END TOP-UP ---
+                    # --- END TOP-UP ---
 
         # keep global cap
         headers = headers[:15]

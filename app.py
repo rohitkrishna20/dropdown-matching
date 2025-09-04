@@ -448,17 +448,12 @@ def api_find_fields():
         # 🔴 NEW: final safety filter against blocklist
         headers = [h for h in headers if _norm(h) not in blocked_norm]
 
-        # --- ADDED MIN-5 TOP-UP: guarantee at least 5 headers when possible ---
-        if len(headers) < 5:
-            extras = [
-                x for x in figma_labels
-                if _norm(x) not in blocked_norm
-                and x not in headers
-                and has_rhs_affinity(x, rhs_meta, min_overlap=0.20)
-            ]
-            need = 5 - len(headers)
-            headers += extras[:need]
-        # --- END MIN-5 TOP-UP ---
+        # 🔴 NEW: final fallback — guarantee at least 1 header
+        if not headers:
+            if figma_labels:
+                headers = [figma_labels[0]]
+            elif rhs_meta:
+                headers = [rhs_meta[0]["leaf"]]
 
         headers = headers[:15]
 

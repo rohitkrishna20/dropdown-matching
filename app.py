@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
@@ -11,7 +10,6 @@ FEEDBACK_PATH = "feedback_memory.json"
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
-# ============== persistence ==============
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -35,7 +33,6 @@ def save_feedback():
 
 feedback_memory = load_feedback()
 
-# ============== text utils (generic) ==============
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else s
 
@@ -76,7 +73,6 @@ def _is_headerish(s: str) -> bool:
     if not any(c.isalpha() for c in s): return False
     return True
 
-# 🔴 NEW: build blocklist from incorrect feedback
 def build_blocklist() -> set:
     """
     Normalized set of headers/patterns to never output again,
@@ -92,7 +88,6 @@ def build_blocklist() -> set:
                     blocked.add(_norm(p))
     return blocked
 
-# ============== tolerant JSON intake (no extra deps) ==============
 def force_decode(raw):
     try:
         rounds = 0
@@ -114,7 +109,6 @@ def get_payload(req):
     # (You can add form/files/raw fallbacks here if you need them again)
     return None
 
-# ============== Figma extraction (TEXT nodes only) ==============
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
     Collect ONLY text from nodes with type == 'TEXT' (characters).
@@ -269,7 +263,6 @@ def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.3
             return True
     return False
 
-# ============== Candidate ranking (lexical first, then FAISS) ==============
 def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int = 3):
     h = header.strip()
     hnorm = _norm(h)
@@ -314,7 +307,6 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
     out.sort(key=lambda x: x.get("score", 1e9))
     return out[:k]
 
-# ============== Ollama info (unchanged) ==============
 def get_ollama_info():
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
@@ -479,9 +471,61 @@ def api_find_fields():
         seen = set()
         headers = [h for h in gated if not (h in seen or seen.add(h))]
 
-        # 🔴 NEW: final safety filter against blocklist
+        # 🔴 final safety filter against blocklist
         headers = [h for h in headers if _norm(h) not in blocked_norm]
 
+        # --- TOP-UP TO 8 HEADERS (non-invasive) ---
+        if len(headers) < 8:
+            # rank remaining figma labels by (affinity first, then shape)
+            def _shape_score2(s: str) -> float:
+                parts = s.strip().split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s)
+                shout = 1.0 if _is_mostly_upper(s) else 0.0
+                # lower is better
+                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
+
+            # candidates not already chosen, not blocked
+            pool = [
+                x for x in figma_labels
+                if x not in headers and _norm(x) not in blocked_norm
+            ]
+
+            pool_sorted = sorted(
+                pool,
+                key=lambda x: (
+                    0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
+                    _shape_score2(x)
+                )
+            )
+
+            for x in pool_sorted:
+                if x in headers:
+                    continue
+                # require at least weak RHS affinity
+                if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
+                    headers.append(x)
+                if len(headers) >= 8:
+                    break
+
+            # If still short, backstop from RHS leaves (distinct, non-empty)
+            if len(headers) < 8:
+                seen_leaf = set(_norm(h) for h in headers)
+                for m in rhs_meta:
+                    leaf = (m.get("leaf") or "").strip()
+                    if not leaf:
+                        continue
+                    if _norm(leaf) in blocked_norm:
+                        continue
+                    if _norm(leaf) in seen_leaf:
+                        continue
+                    headers.append(leaf)
+                    seen_leaf.add(_norm(leaf))
+                    if len(headers) >= 8:
+                        break
+        # --- END TOP-UP ---
+
+        # keep global cap
         headers = headers[:15]
 
         # Build matches (lexical first, FAISS as backstop)

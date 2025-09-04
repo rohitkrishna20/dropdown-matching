@@ -218,10 +218,14 @@ def make_prompt_from_figma(labels: list[str]) -> str:
 
     return f"""
 Extract TABLE COLUMN HEADERS from the candidate label list.
+
+Rules (follow ALL strictly):
 - Use ONLY labels that appear in the list (do not invent).
 - Keep them short (1–3 words), human-readable, column-like (not actions/menus/status).
 - ALWAYS RETURN an output - never have any empty headers!
-- NEVER select a header with "_" or "#"
+- DO NOT select labels that contain an underscore "_" or a hash "#".
+- Avoid generic technical/container words such as: components, schemas, properties, paths, tags, servers, definitions, refs.
+
 
 {avoid}
 {prefer}

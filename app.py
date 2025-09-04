@@ -371,8 +371,11 @@ def api_find_fields():
                             headers.append(norm_fig[nv])
 
         # Fallback: take top header-ish figma labels if LLM produced nothing
-        if not headers:
-            headers = figma_labels[:15]
+       if not headers:
+            if figma_labels:
+                headers = [figma_labels[0]]
+            elif rhs_meta:
+                headers = [rhs_meta[0]["leaf"]]
 
         # Gate headers by RHS affinity (pattern-only, no hard-coding)
         gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]

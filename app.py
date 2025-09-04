@@ -339,6 +339,43 @@ def api_find_fields():
 
         # Figma labels (TEXT nodes only), shape-filtered
         figma_labels = extract_figma_text(figma_json)
+                # --- EMERGENCY FIGMA FALLBACK: if TEXT-node harvest is empty, sweep all strings ---
+        if not figma_labels:
+            def _harvest_strings(node, bag):
+                if isinstance(node, dict):
+                    for v in node.values():
+                        if isinstance(v, str):
+                            s = v.strip()
+                            # keep short-ish, header-ish strings only
+                            if 1 <= len(s) <= 40 and _is_headerish(s):
+                                bag.append(s)
+                        elif isinstance(v, (dict, list)):
+                            _harvest_strings(v, bag)
+                elif isinstance(node, list):
+                    for it in node:
+                        _harvest_strings(it, bag)
+
+            _tmp = []
+            _harvest_strings(figma_json, _tmp)
+
+            # de-dup and basic hygiene: no underscores / hashes / generic tech terms
+            _BAD_TERMS = {
+                "components", "schemas", "properties", "responses",
+                "schema", "paths", "tags", "servers", "definitions", "refs"
+            }
+            seen = set()
+            figma_labels = []
+            for s in _tmp:
+                if s in seen:
+                    continue
+                seen.add(s)
+                if "_" in s or "#" in s:
+                    continue
+                if _norm(s) in _BAD_TERMS:
+                    continue
+                figma_labels.append(s)
+        # --- END EMERGENCY FIGMA FALLBACK ---
+
 
         # Drop labels previously marked incorrect (candidate filter)
         blocked_norm = build_blocklist()

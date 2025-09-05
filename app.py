@@ -272,75 +272,132 @@ Candidate labels:
 {blob}
 """.strip()
 
-# ============== Header gating via RHS affinity (pattern-only) ==============
-def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.34) -> bool:
+# --- add near your helpers ---
+
+# Common UI filler words that shouldn't block semantic matching
+_UI_STOP = {"dashboard", "page", "view", "panel", "tile", "card", "module", "section"}
+
+def _tokens_core(s: str) -> list[str]:
+    if not isinstance(s, str): 
+        return []
+    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)     # camelCase -> camel Case
+    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)       # keep alnum separators
+    return [t for t in s.strip().lower().split() if t]
+
+def _tokens(s: str) -> list[str]:
+    toks = _tokens_core(s)
+    # remove UI filler tokens (improves "Sales Dashboard" -> {"sales"})
+    return [t for t in toks if t not in _UI_STOP]
+
+# Light aliasing to improve overlap without hard-coding outputs
+def _header_aliases(h: str) -> list[str]:
+    hn = _norm(h)
+    aliases = [hn]
+    # map a few short, safe, semantics-preserving aliases
+    # (kept generic; does NOT inject any header not present in figma list)
+    map_simple = {
+        "at risk": "risk",
+        "risk status": "risk",
+        "created on": "created",
+        "created at": "created",
+        "source type": "source",
+        "primary flag": "primary",
+        "account name": "account",
+        "company": "account",
+    }
+    if hn in map_simple:
+        aliases.append(map_simple[hn])
+    # If header is two words and second is a filler, keep the first
+    ht = _tokens_core(hn)
+    if len(ht) == 2 and ht[1] in _UI_STOP:
+        aliases.append(ht[0])
+    return list(dict.fromkeys(aliases))  # dedupe, keep order
+
+# --- tweak the default to be slightly more permissive (was 0.34) ---
+def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.30) -> bool:
     """
     Keep a header only if it has plausible affinity to at least one RHS leaf:
     - exact leaf match (case-insensitive), or
     - substring either way (header in leaf or leaf in header), or
-    - Jaccard token overlap >= min_overlap (default 0.34).
-    - ALWAYS RETURN an output - never have any empty headers
-    - Avoid generic technical/container words such as: components, schemas, properties, paths, tags, servers, definitions, refs.
-    - If a candidate violates these rules, skip it and choose another that fits.
-
-
-
+    - Jaccard token overlap >= min_overlap.
     """
-    h = header.strip()
-    htoks = set(_tokens(h))
-    hnorm = _norm(h)
-    if not htoks and not hnorm:
+    if not isinstance(header, str) or not header.strip():
         return False
-    for m in rhs_meta:
-        leaf = m["leaf"] or ""
-        ln = _norm(leaf)
-        ltoks = set(_tokens(leaf))
-        if not leaf:
-            continue
-        if ln == hnorm:
-            return True
-        if hnorm and (hnorm in ln or ln in hnorm):
-            return True
-        if htoks and ltoks and _jaccard(htoks, ltoks) >= min_overlap:
-            return True
+
+    # Try raw and alias variants (e.g., "At Risk" -> "risk"; "Sales Dashboard" -> "sales")
+    candidates = _header_aliases(header)
+
+    for cand in candidates:
+        htoks = set(_tokens(cand))
+        hnorm = _norm(cand)
+
+        for m in rhs_meta:
+            leaf = m.get("leaf") or ""
+            if not leaf:
+                continue
+            ln = _norm(leaf)
+            ltoks = set(_tokens(leaf))
+
+            if ln == hnorm:
+                return True
+            if hnorm and (hnorm in ln or ln in hnorm):
+                return True
+            if htoks and ltoks:
+                j = _jaccard(htoks, ltoks)
+                if j >= min_overlap:
+                    return True
     return False
 
 def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int = 3):
-    h = header.strip()
-    hnorm = _norm(h)
-    htoks = set(_tokens(h))
+    # consider raw + alias variants
+    variants = _header_aliases(header)
     scored = []
 
-    # lexical passes over leaves (win first)
-    for m in rhs_meta:
-        leaf = m["leaf"] or ""
+    def score_pair(hcand: str, leaf: str):
+        hnorm = _norm(hcand)
+        htoks = set(_tokens(hcand))
         ln = _norm(leaf)
         ltoks = set(_tokens(leaf))
-        score = None
+
         if ln == hnorm:
-            score = 0.0                          # exact = best
-        elif hnorm and (hnorm in ln or ln in hnorm):
-            score = 0.25                         # substring
-        else:
-            j = _jaccard(htoks, ltoks)
-            if j > 0:
-                score = 1.0 - min(0.99, j)       # better overlap -> lower score
-        if score is not None:
-            scored.append((score, m["path"], leaf))
+            return 0.0
+        if hnorm and (hnorm in ln or ln in hnorm):
+            return 0.25
+        j = _jaccard(htoks, ltoks)
+        if j > 0:
+            return 1.0 - min(0.99, j)
+        return None
+
+    # lexical passes win first
+    for m in rhs_meta:
+        leaf = m.get("leaf") or ""
+        best = None
+        for hc in variants:
+            s = score_pair(hc, leaf)
+            if s is not None:
+                best = s if best is None else min(best, s)
+        if best is not None:
+            scored.append((best, m["path"], leaf))
 
     scored.sort(key=lambda x: x[0])
     out = [{"field": p, "field_short": leaf, "score": float(s)} for (s, p, leaf) in scored[:k]]
 
-    # FAISS backfill if needed
+    # FAISS backfill (still helps for fuzzy neighbors)
     if len(out) < k:
         try:
-            res = field_index.similarity_search_with_score(header, k=k*2)
-            for doc, dist in res:
+            # Try all variants; prefer closest overall
+            acc = []
+            for hc in variants:
+                acc.extend(field_index.similarity_search_with_score(hc, k=k*2))
+            # de-dup by path with conservative distance bump
+            seen_paths = {x["field"] for x in out}
+            for doc, dist in acc:
                 pth = doc.metadata.get("path", "")
                 leaf = doc.page_content
-                tup = {"field": pth, "field_short": leaf, "score": float(dist) + 0.5}  # keep after lexical hits
-                if all(pth != x["field"] for x in out):
-                    out.append(tup)
+                if pth in seen_paths:
+                    continue
+                out.append({"field": pth, "field_short": leaf, "score": float(dist) + 0.5})
+                seen_paths.add(pth)
                 if len(out) >= k:
                     break
         except Exception:
@@ -348,6 +405,7 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
 
     out.sort(key=lambda x: x.get("score", 1e9))
     return out[:k]
+
 
 def get_ollama_info():
     try:

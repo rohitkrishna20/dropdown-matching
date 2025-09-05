@@ -56,7 +56,7 @@ def loose_json_loads(s: str) -> Any:
     """
     Best-effort parser for 'JSON-ish' text:
     - strips BOM/ZW chars, comments, trailing commas, smart quotes
-    - extracts the largest {...} or [...] block if there is leading/trailing noise
+    - extracts the largest {...} or [...] if there is leading/trailing noise
     - falls back to base64->JSON
     """
     if not isinstance(s, str):
@@ -115,16 +115,42 @@ def _walk(node: Any) -> Iterable[Dict[str, Any]]:
             yield from _walk(v)
 
 def looks_like_figma(obj: Any) -> bool:
-    # Clues: nodes with type: 'TEXT' or 'DOCUMENT', 'characters' fields, 'document'/'children'
+    """
+    MUCH looser: accept lowercase 'type', plugin shapes, columns with header/headerName,
+    typical Figma-ish keys like absoluteBoundingBox, fills, strokes, style, etc.
+    """
     try:
         for n in _walk(obj):
+            # 1) node type hints (case-insensitive, partial matches)
             t = n.get("type")
-            if isinstance(t, str) and t.upper() in {"TEXT", "DOCUMENT", "FRAME", "PAGE"}:
+            if isinstance(t, str):
+                tl = t.lower()
+                if any(tok in tl for tok in ("text", "document", "frame", "page", "group", "component")):
+                    return True
+
+            # 2) canonical Figma text/content signal
+            if isinstance(n.get("characters"), (str, int, float)):
                 return True
-            if "characters" in n and isinstance(n["characters"], (str, int, float)):
+
+            # 3) table-like structures many plugins export
+            cols = n.get("columns")
+            if isinstance(cols, list):
+                for col in cols:
+                    if isinstance(col, dict) and any(k in col for k in ("header", "headerName", "name", "title", "field")):
+                        return True
+                # columns may be simple arrays of strings as headers
+                if any(isinstance(x, str) for x in cols):
+                    return True
+
+            # 4) typical Figma keys present in nodes
+            if any(k in n for k in ("absoluteBoundingBox", "strokes", "fills", "style", "layoutMode", "constraints")):
                 return True
-            if "document" in n or "children" in n:
-                return True
+
+            # 5) label-ish keys with string values
+            for k in ("text", "content", "title", "label", "heading", "name", "header", "headerName"):
+                v = n.get(k)
+                if isinstance(v, str) and v.strip():
+                    return True
     except Exception:
         pass
     return False
@@ -166,36 +192,75 @@ def _titlecaseish(s: str) -> bool:
 
 def _header_likeliness(s: str) -> float:
     s = s.strip()
-    if not s or _is_numbery(s) or len(s) < 2 or len(s) > 40:
+    if not s or _is_numbery(s) or len(s) < 2 or len(s) > 60:  # allow slightly longer labels
         return 0.0
     toks = _tokens(s)
     if not toks or any(t in GENERIC_BAD_WORDS for t in toks):
         return 0.0
     score = 0.0
-    if len(toks) <= 5: score += 0.35
+    if len(toks) <= 6: score += 0.35
     if _titlecaseish(s): score += 0.25
     score += min(0.4, 0.1 * sum(1 for t in toks if len(t) >= 3))
     return score
 
+HEADER_VALUE_KEYS = {"characters","name","text","content","title","label","heading","header","headerName","field"}
+
 def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
     cand: List[str] = []
+
+    def add_if_good(val: Any):
+        if isinstance(val, str):
+            s = val.strip()
+            if s and s.lower() != "text" and not _is_numbery(s) and _header_likeliness(s) >= 0.45:
+                cand.append(s)
+        elif isinstance(val, (int, float)):
+            # ignore numbers
+            pass
+        elif isinstance(val, list):
+            for x in val:
+                add_if_good(x)
+
     for node in _walk(figma):
-        if isinstance(node, dict):
-            if node.get("type") == "TEXT":
-                txt = (node.get("characters") or "").strip()
-                if txt and txt.lower() != "text" and not _is_numbery(txt):
-                    cand.append(txt)
-            nm = node.get("name")
-            if isinstance(nm, str):
-                nm = nm.strip()
-                if nm and len(nm) <= 40 and not _is_numbery(nm) and "/" not in nm and nm.lower() not in GENERIC_BAD_WORDS:
-                    cand.append(nm)
-    keep = [s.strip() for s in cand if _header_likeliness(s) >= 0.45]
+        if not isinstance(node, dict):
+            continue
+
+        # 1) canonical text/name keys
+        for k in HEADER_VALUE_KEYS:
+            if k in node:
+                add_if_good(node.get(k))
+
+        # 2) columns[] with header-ish keys or plain strings
+        cols = node.get("columns")
+        if isinstance(cols, list):
+            for col in cols:
+                if isinstance(col, dict):
+                    for kk in ("header", "headerName", "name", "title"):
+                        if kk in col:
+                            add_if_good(col.get(kk))
+                elif isinstance(col, str):
+                    add_if_good(col)
+
+        # 3) any key that *contains* 'header' or 'title'
+        for k, v in node.items():
+            if isinstance(k, str) and any(tag in k.lower() for tag in ("header", "title")):
+                add_if_good(v)
+
+    # Emergency sweep if nothing found: harvest short string values from benign keys
+    if not cand:
+        benign = {"placeholder","ariaLabel","alt","value","textValue"}
+        for node in _walk(figma):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if isinstance(v, str) and k not in {"id","type","class","href","url"} | benign:
+                        add_if_good(v)
+
+    # dedupe preserve order
     seen, out = set(), []
-    for h in keep:
-        k = re.sub(r"\s+"," ", h).lower()
-        if k not in seen:
-            seen.add(k); out.append(h.strip())
+    for h in cand:
+        key = re.sub(r"\s+", " ", h).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(h)
     return out
 
 def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
@@ -352,9 +417,36 @@ def _collect_candidates_from_body(body: Any) -> Tuple[List[Any], List[Any], Dict
 
 # =========================== Core handler (shared by all POST aliases) ===========================
 
+def _prefer_explicit_over_detect(wrapper: dict) -> Tuple[Optional[Any], Optional[Any]]:
+    """
+    If the user provided figma_jsons / schema_jsons keys, decode the first entry directly,
+    even if the classifier is unsure. This avoids 'no figma-like json' when users paste
+    exotic Figma exports.
+    """
+    figma = schema = None
+    # singular or plural keys accepted
+    fj = wrapper.get("figma_jsons") or wrapper.get("figma_json")
+    sj = wrapper.get("schema_jsons") or wrapper.get("schema_json") or wrapper.get("openapi")
+    try:
+        if isinstance(fj, list) and fj:
+            figma = force_decode_any(fj[0])
+        elif isinstance(fj, (dict, str, bytes, bytearray)):
+            figma = force_decode_any(fj)
+    except Exception:
+        figma = None
+    try:
+        if isinstance(sj, list) and sj:
+            schema = force_decode_any(sj[0])
+        elif isinstance(sj, (dict, str, bytes, bytearray)):
+            schema = force_decode_any(sj)
+    except Exception:
+        schema = None
+    return figma, schema
+
 def _headers_map_core():
     """
     Accepts messy JSON and auto-detects Figma vs OpenAPI blobs.
+    Prefers explicitly provided figma_jsons/schema_jsons if present.
     Returns headers harvested from Figma and top-3 schema fields for each header.
     """
     try:
@@ -369,25 +461,30 @@ def _headers_map_core():
             return jsonify({"error": "Request body must be a JSON object or array."}), 400
         wrapper = {"payload": body} if isinstance(body, list) else body
 
-        # Gather candidates from conventional keys and anywhere in the body
+        # 0) Prefer explicitly provided blobs when present
+        figma_explicit, schema_explicit = (None, None)
+        if isinstance(wrapper, dict):
+            figma_explicit, schema_explicit = _prefer_explicit_over_detect(wrapper)
+
+        # 1) Collect candidates via scanning (handles messy placements)
         figma_cands, schema_cands, dbg = _collect_candidates_from_body(wrapper)
 
-        if not figma_cands:
-            return jsonify({"error": "No Figma-like JSON detected in request.",
+        # 2) Resolve final figma/schema
+        figma = figma_explicit or (figma_cands[0] if figma_cands else None)
+        schema = schema_explicit or (schema_cands[0] if schema_cands else None)
+
+        if figma is None:
+            return jsonify({"error": "No Figma-like JSON detected (and none provided in figma_jsons).",
                             "debug": dbg}), 400
-        if not schema_cands:
-            return jsonify({"error": "No OpenAPI/Schema-like JSON detected in request.",
+        if schema is None:
+            return jsonify({"error": "No OpenAPI/Schema-like JSON detected (and none provided in schema_jsons).",
                             "debug": dbg}), 400
 
-        # Choose the first of each (most requests send one of each)
-        figma = figma_cands[0]
-        schema = schema_cands[0]
-
-        # Extract headers & schema fields
+        # 3) Extract headers & schema fields
         headers = extract_figma_headers(figma)
         fields = collect_schema_fields(schema)
 
-        # Map each header to top-3 fields (optionally refine with LLM)
+        # 4) Map each header to top-3 fields (optionally refine with LLM)
         draft = {h: top_k_fields(h, fields, k=3) for h in headers}
         if isinstance(wrapper, dict):
             use_llm = bool(wrapper.get("use_llm", True))
@@ -404,8 +501,8 @@ def _headers_map_core():
                 "used_llm": bool(final is not None),
                 "figma_candidates": len(figma_cands),
                 "schema_candidates": len(schema_cands),
-                "keys_seen": sorted(set(dbg.get("keys_seen", [])))[:50],
-                "notes": "Permissive parsing enabled: comments, trailing commas, base64, stringified JSON supported."
+                "keys_seen": sorted(set(dbg.get("keys_seen", [])))[:200],  # cap to keep response readable
+                "notes": "Permissive parsing enabled. Explicit figma_jsons/schema_jsons preferred over auto-detect."
             }
         }), 200
 

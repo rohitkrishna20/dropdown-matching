@@ -435,15 +435,16 @@ def ollama_headers_and_mapping(
             "SEED_MAPPING": seed_mapping or {},
             "USER_GUIDANCE": (user_prompt or "").strip()
         }
-        system_msg = (
-            "You extract UI section headers from a Figma export and map them to OpenAPI schema fields.\n"
-            "STRICT RULES:\n"
-            "1) Choose headers ONLY from CANDIDATE_HEADERS by returning their 'id' values (H1,H2,...). Do not invent.\n"
-            "2) For each chosen header id, select up to 3 field ids ONLY from SCHEMA_FIELDS (F1,F2,...).\n"
-            "3) Output STRICT JSON: {\"headers\":[\"H#\", ...], \"mapping\":{\"H#\":[\"F#\",\"F#\",\"F#\"], ...}}\n"
-            "4) If no good fields for a header, use [].\n"
-            "5) No prose or markdown. Only the JSON object.\n"
-        )
+       system_msg = (
+    "You extract UI section headers from a Figma export and map them to OpenAPI schema fields.\n"
+    "STRICT RULES:\n"
+    "1) Choose headers ONLY from CANDIDATE_HEADERS by returning their 'id' values (H1,H2,...). Do not invent.\n"
+    "2) For each chosen header id, select EXACTLY 3 field ids ONLY from SCHEMA_FIELDS (F1,F2,...) if at least 3 exist.\n"
+    "   If fewer than 3 fields exist in SCHEMA_FIELDS, return as many as exist (2 or 1).\n"
+    "3) If unsure which fields to choose, prefer the ones suggested in SEED_MAPPING (ids) for that header.\n"
+    "4) Output STRICT JSON: {\"headers\":[\"H#\", ...], \"mapping\":{\"H#\":[\"F#\",\"F#\",\"F#\"], ...}}\n"
+    "5) No prose or markdown. Only the JSON object.\n"
+)
         user_msg = (
             "Follow the rules. Consider SEED_MAPPING and USER_GUIDANCE as hints.\n\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
@@ -523,6 +524,33 @@ def ollama_headers_and_mapping(
             mapping_out[header_label] = good_fields
 
     mapping_out = {h: mapping_out.get(h, [])[:3] for h in headers_out}
+
+    # --- ALWAYS-FILL FALLBACK: ensure each header has up to 3 fields ---
+# Try seed_mapping first; if still short, use semantic top_k_fields.
+    for h in headers_out:
+        current = mapping_out.get(h, [])
+        if len(current) >= 3:
+            mapping_out[h] = current[:3]
+            continue
+    
+        # 1) seeds (string labels) -> keep those that exist in schema_list
+        seed_labels = (seed_mapping or {}).get(h, []) if isinstance(seed_mapping, dict) else []
+        seed_clean = [f for f in seed_labels if f in schema_list]
+    
+        # 2) fill with heuristics as needed
+        if len(seed_clean) < 3:
+            heuristic = [f for f in top_k_fields(h, schema_list, k=3) if f not in seed_clean]
+            seed_clean.extend(heuristic)
+    
+        # merge with any LLM-provided fields (avoid dupes), cap at 3
+        combined = []
+        for f in (current + seed_clean):
+            if f in schema_list and f not in combined:
+                combined.append(f)
+            if len(combined) >= 3:
+                break
+        mapping_out[h] = combined
+
     if not headers_out:
         return None
     return {"headers": headers_out, "mapping": mapping_out}

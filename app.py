@@ -111,7 +111,6 @@ def _valid_figma_label(t: str) -> bool:
     if not s: return False
     if _looks_like_hex_id(s) or _looks_like_base62_id(s): return False
     if "_" in s or "#" in s: return False
-    if "-" in s: return False
     if any(ch.isdigit() for ch in s): return False
     if len(s) > 24: return False
     if len(s.split()) > 3: return False
@@ -149,6 +148,10 @@ def get_payload(req):
     if isinstance(payload, dict) and payload:
         return payload
     return None
+
+def _root_token(h: str) -> str:
+    t = _tokens(h)
+    return t[0] if t else ""
 
 def _ensure_min_headers(headers: list[str], rhs_meta: list[dict], min_k: int = 5) -> list[str]:
     """
@@ -403,6 +406,9 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
             if s is not None:
                 best = s if best is None else min(best, s)
         if best is not None:
+            # tiny preference for alias leaves (human readable)
+            if "alias_of" in m:
+                best = max(0.0, best - 0.05)  # lower score = better
             scored.append((best, m["path"], leaf))
 
     scored.sort(key=lambda x: x[0])
@@ -698,6 +704,16 @@ def api_find_fields():
             headers = _ensure_min_headers([], rhs_meta, min_k=5)
 
         headers = headers[:15]
+
+        # If we only have variations of a single root (e.g., just "Dashboard"), pad to 5.
+        if len(headers) < 5:
+            roots = { _root_token(h) for h in headers }
+            # If nothing made it this far, look at figma labels to decide skimpy-ness
+            if not roots and 'figma_labels' in locals():
+                roots = { _root_token(" ".join(figma_labels)) } if figma_labels else set()
+            if len(roots) <= 1:
+                headers = _ensure_min_headers(headers, rhs_meta, min_k=5)
+
 
         # Build matches
         matches = {}

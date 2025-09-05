@@ -1,9 +1,9 @@
 from __future__ import annotations
 from flask import Flask, request, jsonify
 import json, re, os, sys
-from typing import Any, Dict, List, Iterable, Tuple
+from typing import Any, Dict, List, Iterable, Tuple, Optional
 
-# Optional: local open-source LLM via Ollama
+# Optional: local open-source LLM via Ollama (used only for re-ranking)
 try:
     import ollama
     OLLAMA_OK = True
@@ -11,30 +11,150 @@ except Exception:
     OLLAMA_OK = False
 
 app = Flask(__name__)
+app.url_map.strict_slashes = False  # accept /path and /path/
 
-# ---------------- Utils ----------------
+# ---------------- Permissive "JSON-ish" parsing ----------------
 
-def force_decode(x: Any) -> Any:
+SMART_QUOTES = {
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u2032": "'",
+}
+
+def _strip_bom_zw(s: str) -> str:
+    return s.replace("\ufeff", "").replace("\u200b", "").replace("\u200e", "").replace("\u200f", "")
+
+def _normalize_quotes(s: str) -> str:
+    for k, v in SMART_QUOTES.items():
+        s = s.replace(k, v)
+    return s
+
+def _strip_comments(s: str) -> str:
+    # remove // line comments and /* block */ comments
+    s = re.sub(r"//.*?$", "", s, flags=re.M)
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    return s
+
+def _strip_trailing_commas(s: str) -> str:
+    # Remove trailing commas before } or ]
+    return re.sub(r",\s*([}\]])", r"\1", s)
+
+def _extract_bracketed(s: str) -> Optional[str]:
+    # Try to extract the largest {...} or [...] block if the string has noise around it
+    first_obj = s.find("{")
+    last_obj = s.rfind("}")
+    first_arr = s.find("[")
+    last_arr = s.rfind("]")
+
+    cand = None
+    if first_obj != -1 and last_obj != -1 and last_obj > first_obj:
+        cand = s[first_obj:last_obj+1]
+    if first_arr != -1 and last_arr != -1 and last_arr > first_arr:
+        arr = s[first_arr:last_arr+1]
+        # prefer the larger of the two captures
+        if cand is None or len(arr) > len(cand):
+            cand = arr
+    return cand
+
+def loose_json_loads(s: str) -> Any:
     """
-    Accepts dict/list (already JSON), JSON string, or base64-encoded JSON string.
-    Returns a Python object or raises ValueError.
+    Best-effort parser for 'JSON-ish' text:
+    - strips BOM/ZW chars, comments, trailing commas, smart quotes
+    - extracts the largest {...} or [...] if there is leading/trailing noise
+    """
+    if not isinstance(s, str):
+        s = str(s)
+    s = _strip_bom_zw(s)
+    s = _normalize_quotes(s)
+    s = _strip_comments(s)
+    s = _strip_trailing_commas(s).strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # Try extracting the biggest JSON block
+    cand = _extract_bracketed(s)
+    if cand:
+        try:
+            return json.loads(cand)
+        except Exception:
+            # Maybe trailing commas remain inside the sub-block
+            cand2 = _strip_trailing_commas(cand)
+            return json.loads(cand2)
+
+    # Last resort: if it's base64 of JSON
+    try:
+        import base64
+        s2 = base64.b64decode(s).decode("utf-8", errors="ignore")
+        s2 = _strip_bom_zw(_normalize_quotes(_strip_comments(_strip_trailing_commas(s2))))
+        return json.loads(s2)
+    except Exception:
+        pass
+
+    raise ValueError("Could not parse body as JSON (even after cleanup).")
+
+def force_decode_any(x: Any) -> Any:
+    """
+    Accept dict/list as-is; if str/bytes, attempt loose JSON parse or base64->JSON.
     """
     if isinstance(x, (dict, list)):
         return x
     if isinstance(x, (bytes, bytearray)):
         x = x.decode("utf-8", errors="ignore")
-    s = str(x)
+    if isinstance(x, str):
+        return loose_json_loads(x)
+    raise ValueError("Unsupported payload type.")
+
+# ---------------- Heuristics: classify Figma vs OpenAPI ----------------
+
+def _walk(node: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk(v)
+
+def looks_like_figma(obj: Any) -> bool:
+    # Clues: nodes with type: 'TEXT' or 'DOCUMENT', 'characters' fields, 'document'/'children'
     try:
-        return json.loads(s)
+        for n in _walk(obj):
+            t = n.get("type")
+            if isinstance(t, str) and t.upper() in {"TEXT", "DOCUMENT", "FRAME", "PAGE"}:
+                return True
+            if "characters" in n and isinstance(n["characters"], (str, int, float)):
+                return True
+            if "document" in n or "children" in n:
+                # Figma export often carries these
+                return True
     except Exception:
         pass
-    import base64
-    try:
-        s2 = base64.b64decode(s).decode("utf-8", errors="ignore")
-        return json.loads(s2)
-    except Exception:
-        raise ValueError("Could not parse JSON (nor base64-encoded JSON).")
+    return False
 
+def looks_like_openapi(obj: Any) -> bool:
+    # Clues: 'openapi' or 'swagger' keys; components.schemas.*.properties
+    if not isinstance(obj, dict):
+        return False
+    if "openapi" in obj or "swagger" in obj:
+        return True
+    comps = obj.get("components", {})
+    if isinstance(comps, dict):
+        sch = comps.get("schemas", {})
+        if isinstance(sch, dict) and sch:
+            return True
+    # Paths is another clue
+    if isinstance(obj.get("paths", {}), dict) and obj.get("paths", {}):
+        return True
+    return False
+
+# ---------------- Header extraction & mapping (unchanged core) ----------------
+
+GENERIC_BAD_WORDS = {
+    "text","label","button","primary","action","subtitle","search","timestamp","icon","menu","close","cancel","ok"
+}
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
 def _tokens(s: str) -> List[str]:
@@ -49,21 +169,6 @@ def _titlecaseish(s: str) -> bool:
     if not letters:
         return False
     return s.istitle() or s.isupper()
-
-# ---------------- Figma header harvest ----------------
-
-GENERIC_BAD_WORDS = {
-    "text","label","button","primary","action","subtitle","search","timestamp","icon","menu","close","cancel","ok"
-}
-
-def _walk(node: Any) -> Iterable[Dict[str, Any]]:
-    if isinstance(node, dict):
-        yield node
-        for v in node.values():
-            yield from _walk(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from _walk(v)
 
 def _header_likeliness(s: str) -> float:
     s = s.strip()
@@ -100,8 +205,6 @@ def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
             seen.add(k); out.append(h.strip())
     return out
 
-# ---------------- Schema field mining ----------------
-
 def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
     fields = set()
     comps = openapi.get("components", {}).get("schemas", {})
@@ -110,8 +213,6 @@ def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
         for k in props.keys():
             fields.add(str(k))
     return sorted(fields)
-
-# ---------------- Similarity & mapping ----------------
 
 def jaccard(a: Iterable[str], b: Iterable[str]) -> float:
     sa, sb = set(a), set(b)
@@ -188,7 +289,6 @@ def refine_with_llm(model: str, headers: List[str], fields: List[str], draft: Di
         for h in headers:
             lst = obj.get(h, []) if isinstance(obj, dict) else []
             lst = [x for x in lst if x in fields_set][:3]
-            # top up from draft if needed
             for x in draft.get(h, []):
                 if len(lst) >= 3: break
                 if x in fields_set and x not in lst:
@@ -198,46 +298,119 @@ def refine_with_llm(model: str, headers: List[str], fields: List[str], draft: Di
     except Exception:
         return None
 
+# ---------------- Robust body ingestion & classification ----------------
+
+def _collect_candidates_from_body(body: Any) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
+    """
+    Returns (figma_candidates, schema_candidates, debug_info).
+    Scans known keys and falls back to classifying all dicts found anywhere.
+    """
+    dbg = {"keys_seen": [], "paths_scanned": 0}
+
+    figma_cands: List[Any] = []
+    schema_cands: List[Any] = []
+
+    def push_candidate(x: Any):
+        nonlocal figma_cands, schema_cands
+        try:
+            obj = force_decode_any(x)
+        except Exception:
+            return
+        try:
+            if looks_like_figma(obj):
+                figma_cands.append(obj); return
+            if looks_like_openapi(obj):
+                schema_cands.append(obj); return
+            # Unknown: ignore silently
+        except Exception:
+            pass
+
+    def scan(node: Any):
+        dbg["paths_scanned"] += 1
+        if isinstance(node, dict):
+            for k, v in node.items():
+                dbg["keys_seen"].append(k)
+                if k.lower() in {"figma", "figma_json", "figmajson"}:
+                    push_candidate(v)
+                if k.lower() in {"schema", "schema_json", "schemajson", "openapi"}:
+                    push_candidate(v)
+                if k.lower() in {"figma_jsons", "figmas", "figma_list"} and isinstance(v, list):
+                    for it in v: push_candidate(it)
+                if k.lower() in {"schema_jsons", "schemas", "schema_list"} and isinstance(v, list):
+                    for it in v: push_candidate(it)
+                # Always descend
+                scan(v)
+        elif isinstance(node, list):
+            for it in node:
+                scan(it)
+        elif isinstance(node, (str, bytes, bytearray)):
+            # Might be a stringified JSON; try to parse and classify
+            try:
+                obj = force_decode_any(node)
+                scan(obj)
+            except Exception:
+                pass
+
+    scan(body)
+
+    # If none explicitly found, look for any dicts and classify
+    if not figma_cands and not schema_cands:
+        for n in _walk(body):
+            if looks_like_figma(n): figma_cands.append(n)
+            if looks_like_openapi(n): schema_cands.append(n)
+
+    return figma_cands, schema_cands, dbg
+
 # ---------------- API ----------------
+
+@app.get("/api/headers-map")
+def headers_map_help():
+    return jsonify({
+        "hint": "POST JSON to this endpoint. It accepts messy inputs and will auto-detect Figma vs OpenAPI.",
+        "minimal_example": {
+            "figma_jsons": ["<Figma JSON object OR string>"],
+            "schema_jsons": ["<OpenAPI JSON object OR string>"],
+            "use_llm": True,
+            "llm_model": "llama3"
+        }
+    }), 200
 
 @app.post("/api/headers-map")
 def api_headers_map():
-    """
-    Body (Dashboard *or* Opportunities test):
-    {
-      "figma_jsons": [ { ... Figma JSON object ... } ],
-      "schema_jsons": [ { ... OpenAPI JSON object ... } ],
-      "use_llm": true,
-      "llm_model": "llama3"
-    }
-    """
     try:
-        body = request.get_json(force=True, silent=False)
-        if not isinstance(body, dict):
-            return jsonify({"error":"Body must be a JSON object"}), 400
+        # 1) Try standard JSON first; if missing/invalid, fall back to permissive parse
+        body = request.get_json(silent=True)
+        if body is None:
+            raw = request.get_data(as_text=True)
+            body = loose_json_loads(raw)
 
-        fj = body.get("figma_jsons")
-        sj = body.get("schema_jsons")
-        if not isinstance(fj, list) or not isinstance(sj, list):
-            return jsonify({"error":"Provide arrays 'figma_jsons' and 'schema_jsons'."}), 400
-        if len(fj) != 1 or len(sj) != 1:
-            return jsonify({"error":"Provide exactly ONE Figma JSON and ONE Schema JSON per request."}), 400
+        # Accept list-or-dict; if list, wrap it so we can scan uniformly
+        if not isinstance(body, (dict, list)):
+            raise ValueError("Request body must be a JSON object or array.")
+        wrapper = {"payload": body} if isinstance(body, list) else body
 
-        figma = force_decode(fj[0])
-        schema = force_decode(sj[0])
+        # 2) Gather candidates from conventional keys and anywhere in the body
+        figma_cands, schema_cands, dbg = _collect_candidates_from_body(wrapper)
 
-        # 1) headers from that ONE figma
+        if not figma_cands:
+            return jsonify({"error": "No Figma-like JSON detected in request.",
+                            "debug": dbg}), 400
+        if not schema_cands:
+            return jsonify({"error": "No OpenAPI/Schema-like JSON detected in request.",
+                            "debug": dbg}), 400
+
+        # 3) Choose the first of each (most requests send one of each)
+        figma = figma_cands[0]
+        schema = schema_cands[0]
+
+        # 4) Extract headers & schema fields
         headers = extract_figma_headers(figma)
-
-        # 2) fields from that ONE schema
         fields = collect_schema_fields(schema)
 
-        # 3) heuristic top-3 per header
+        # 5) Map each header to top-3 fields (optionally refine with LLM)
         draft = {h: top_k_fields(h, fields, k=3) for h in headers}
-
-        # 4) optional LLM refine
-        use_llm = bool(body.get("use_llm", True))
-        model = body.get("llm_model", "llama3")
+        use_llm = bool((wrapper if isinstance(wrapper, dict) else {}).get("use_llm", True))
+        model = (wrapper if isinstance(wrapper, dict) else {}).get("llm_model", "llama3")
         final = refine_with_llm(model, headers, fields, draft) if (use_llm and OLLAMA_OK) else None
 
         return jsonify({
@@ -245,7 +418,10 @@ def api_headers_map():
             "mapping": final or draft,
             "debug": {
                 "used_llm": bool(final is not None),
-                "notes": "One-to-one figma/schema mapping; headers only come from provided Figma."
+                "figma_candidates": len(figma_cands),
+                "schema_candidates": len(schema_cands),
+                "keys_seen": sorted(set(dbg.get("keys_seen", [])))[:50],
+                "notes": "Permissive parsing enabled: comments, trailing commas, base64, stringified JSON supported."
             }
         }), 200
 

@@ -253,24 +253,51 @@ def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
       - common label keys: name/text/content/title/label/heading/header/headerName/field
       - columns[] (header/headerName/name/title or plain strings)
       - ALSO: from *keys themselves* by splitting delimiters & camelCase, then scoring like headers
+      - NEW: if a value is a JSON string (e.g., frameMeta), parse it and recurse
     """
     cand: List[str] = []
+
+    HEADER_VALUE_KEYS = {"characters","name","text","content","title","label","heading","header","headerName","field"}
+    _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+    _NONWORD_SPLIT = re.compile(r"[^\w]+")
+
+    def _to_phrase(s: str) -> str:
+        s = re.sub(r"#\d+:\d+", " ", s)           # drop id/hash suffixes like '#1234:0'
+        parts = _NONWORD_SPLIT.split(s)
+        parts2 = []
+        for p in parts:
+            if not p: continue
+            parts2 += _CAMEL_SPLIT.split(p)       # split camelCase / PascalCase
+        phrase = " ".join(parts2)
+        return re.sub(r"\s+", " ", phrase).strip()
 
     def consider(val: Any):
         if isinstance(val, str):
             s = val.strip()
+            # try to parse JSON-in-string (e.g., frameMeta)
+            if s and (s.startswith("{") or s.startswith("[")):
+                try:
+                    sub = loose_json_loads(s)
+                    harvest(sub)
+                    return
+                except Exception:
+                    pass
+            # otherwise treat as a candidate label
             if s and s.lower() != "text" and not _is_numbery(s):
                 if _header_likeliness(s) >= 0.45:
                     cand.append(s)
         elif isinstance(val, list):
             for x in val:
                 consider(x)
+        elif isinstance(val, dict):
+            harvest(val)
 
-    HEADER_VALUE_KEYS = {"characters","name","text","content","title","label","heading","header","headerName","field"}
-
-    for node in _walk(figma):
+    def harvest(node: Any):
+        if isinstance(node, list):
+            for it in node: harvest(it)
+            return
         if not isinstance(node, dict):
-            continue
+            return
 
         # 1) values in known label-ish fields
         for k in HEADER_VALUE_KEYS:
@@ -290,32 +317,35 @@ def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
 
         # 3) mine *keys* themselves (convert to phrases)
         for k in list(node.keys()):
-            if not isinstance(k, str):
+            if not isinstance(k, str): continue
+            if k in {"id","type","class","href","url","key"}:  # skip very technical keys
                 continue
-            # ignore very technical keys
-            if k in {"id","type","class","href","url","key"}:
-                continue
-            phrase = _to_phrase(k)
-            # e.g., '/data/DY HomePage ... SalesDashboard VBC/' -> 'data DY Home Page ... Sales Dashboard VBC'
-            phrase = phrase.strip(" /")
+            phrase = _to_phrase(k).strip(" /")
             if phrase and _header_likeliness(phrase) >= 0.50:
                 cand.append(phrase)
 
-    # Emergency: if nothing collected, sweep short strings in nodes
-    if not cand:
-        benign_skip = {"id","type","class","href","url","key"}
-        for node in _walk(figma):
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    if k in benign_skip:
-                        continue
-                    if isinstance(v, str):
-                        consider(v)
+        # 4) always descend into values (and auto-parse JSON-ish strings)
+        for v in node.values():
+            consider(v)
 
-    # normalize, dedupe, and prefer longer composites over their subsets
+    # kick off
+    harvest(figma)
+
+    # normalize, prefer longer composites, then rank
+    def _prefer_longer_phrases(cands: List[str]) -> List[str]:
+        keep, lowered = [], [c.lower() for c in cands]
+        for i, c in enumerate(cands):
+            cl, drop = lowered[i], False
+            for j, d in enumerate(cands):
+                if i == j: continue
+                dl = lowered[j]
+                if cl != dl and cl in dl and len(_tokens(d)) >= len(_tokens(c)) + 1:
+                    drop = True; break
+            if not drop: keep.append(c)
+        return keep
+
     norm = lambda x: re.sub(r"\s+", " ", x).strip()
-    uniq = []
-    seen = set()
+    uniq, seen = [], set()
     for s in cand:
         ss = norm(s)
         if ss.lower() not in seen:
@@ -323,11 +353,9 @@ def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
             uniq.append(ss)
 
     uniq = _prefer_longer_phrases(uniq)
-
-    # optional: cap to a reasonable number (top by header-likeliness)
     uniq_scored = sorted([(s, _header_likeliness(s)) for s in uniq], key=lambda t: t[1], reverse=True)
-    out = [s for s, _ in uniq_scored[:50]]  # keep top 50 headers max
-    return out
+    return [s for s, _ in uniq_scored[:50]]
+
 
 def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
     fields = set()

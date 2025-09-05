@@ -347,6 +347,7 @@ def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
 
     # kick off
     harvest(figma)
+    uniq = [s for s in uniq if not _is_junky_label(s)]
 
     # normalize, prefer longer composites, then rank
     def _prefer_longer_phrases(cands: List[str]) -> List[str]:

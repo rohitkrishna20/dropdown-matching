@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
-import json, re, os, requests, ollama, math
+import json, re, os, requests, ollama
 
 app = Flask(__name__)
 
@@ -10,6 +10,7 @@ FEEDBACK_PATH = "feedback_memory.json"
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
+# -------------------- Feedback store --------------------
 def load_feedback():
     if os.path.exists(FEEDBACK_PATH):
         try:
@@ -33,14 +34,22 @@ def save_feedback():
 
 feedback_memory = load_feedback()
 
+# -------------------- Text utils --------------------
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else s
 
-def _tokens(s: str) -> list[str]:
-    if not isinstance(s, str): return []
-    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)  # camelCase -> camel Case
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)    # keep alnum separators
+_UI_STOP = {"dashboard", "page", "view", "panel", "tile", "card", "module", "section", "tab"}
+
+def _tokens_core(s: str) -> list[str]:
+    if not isinstance(s, str): 
+        return []
+    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)     # camelCase -> camel Case
+    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)       # keep alnum separators
     return [t for t in s.strip().lower().split() if t]
+
+def _tokens(s: str) -> list[str]:
+    toks = _tokens_core(s)
+    return [t for t in toks if t not in _UI_STOP]
 
 def _jaccard(a: set, b: set) -> float:
     if not a and not b: return 0.0
@@ -56,17 +65,26 @@ def _is_mostly_numeric(s: str) -> bool:
     digits = sum(c.isdigit() for c in s)
     return digits / max(1, len(s)) >= 0.4
 
+ID_BASE62 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+def _looks_like_hex_id(s: str) -> bool:
+    w = s.strip()
+    return bool(re.fullmatch(r"[0-9a-fA-F]{10,}", w))
+
+def _looks_like_base62_id(s: str) -> bool:
+    w = s.strip()
+    return len(w) >= 10 and " " not in w and all(c in ID_BASE62 for c in w)
+
 def _looks_like_id(s: str) -> bool:
     if not isinstance(s, str):
         return False
     t = s.strip()
-    if not t:
-        return False
+    if not t: return False
     if " " not in t and len(t) >= 8:
         alnum_ratio = sum(c.isalnum() for c in t) / len(t)
         if alnum_ratio >= 0.9 and any(c.isdigit() for c in t):
             return True
-    if re.fullmatch(r"[A-Fa-f0-9]{8,}", t):
+    if _looks_like_hex_id(t) or _looks_like_base62_id(t):
         return True
     if re.fullmatch(r"[A-Za-z0-9_-]{12,}", t):
         return True
@@ -87,39 +105,20 @@ def _is_headerish(s: str) -> bool:
     if not any(c.isalpha() for c in s): return False
     return True
 
-ID_BASE62 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
-
-def _looks_like_hex_id(s: str) -> bool:
-    w = s.strip()
-    return bool(re.fullmatch(r"[0-9a-fA-F]{10,}", w))  # e.g., 683f60c962e2...
-
-def _looks_like_base62_id(s: str) -> bool:
-    w = s.strip()
-    # long, mostly base62-ish, no spaces -> likely a node/id
-    return len(w) >= 10 and " " not in w and all(c in ID_BASE62 for c in w)
-
 def _valid_figma_label(t: str) -> bool:
     if not isinstance(t, str): return False
     s = t.strip()
     if not s: return False
-    # drop obvious IDs / codes / refs
     if _looks_like_hex_id(s) or _looks_like_base62_id(s): return False
-    # shape constraints for column headers
     if "_" in s or "#" in s: return False
-    if "-" in s: return False                           # avoids “Dashboard - My Opportunities”
-    if any(ch.isdigit() for ch in s): return False      # drop “Q3 2024”, etc.
-    if len(s) > 24: return False                        # too long for a column header
-    if len(s.split()) > 3: return False                 # very long phrases
+    if "-" in s: return False
+    if any(ch.isdigit() for ch in s): return False
+    if len(s) > 24: return False
+    if len(s.split()) > 3: return False
     return _is_headerish(s)
 
-
-
-
+# -------------------- Feedback blocklist --------------------
 def build_blocklist() -> set:
-    """
-    Normalized set of headers/patterns to never output again,
-    sourced from feedback_memory['incorrect'].
-    """
     blocked = set()
     inc = feedback_memory.get("incorrect", {}) or {}
     for hdr, pats in inc.items():
@@ -130,6 +129,7 @@ def build_blocklist() -> set:
                     blocked.add(_norm(p))
     return blocked
 
+# -------------------- JSON helpers --------------------
 def force_decode(raw):
     try:
         rounds = 0
@@ -148,13 +148,13 @@ def get_payload(req):
     payload = req.get_json(silent=True)
     if isinstance(payload, dict) and payload:
         return payload
-    # (You can add form/files/raw fallbacks here if you need them again)
     return None
 
+# -------------------- Figma harvest --------------------
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
-    Collect ONLY text from nodes with type == 'TEXT' (characters).
-    No 'name' keys or component metadata. Then keep only header-ish shapes.
+    Preferred: TEXT nodes' 'characters'.
+    Fallback (same pass): any 'name' values (Frame/Group/Component) -> split camel/kebab/_ and clean.
     """
     out = []
 
@@ -162,14 +162,30 @@ def extract_figma_text(figma_json: dict) -> list[str]:
         cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
         return cleaned.replace(".", "").isdigit()
 
+    def add_clean(s: str):
+        if not isinstance(s, str): return
+        s2 = s.strip()
+        if not s2: return
+        # convert camel/kebab/underscores to spaces, titlecase where appropriate
+        s_norm = " ".join(_tokens_core(s2)).strip()
+        s_norm = re.sub(r"\s+", " ", s_norm)
+        s_title = " ".join(w.capitalize() for w in s_norm.split())
+        # keep both original (if looks like plain text) and the cleaned title
+        cands = [s2, s_title]
+        for c in cands:
+            if c and not is_numeric(c) and _is_headerish(c):
+                out.append(c)
+
     def walk(node):
         if isinstance(node, dict):
             if node.get("type") == "TEXT":
                 val = node.get("characters", "")
                 if isinstance(val, str):
-                    s = val.strip()
-                    if s and not is_numeric(s) and _is_headerish(s):
-                        out.append(s)
+                    add_clean(val)
+            # also allow 'name' fields because some dashboard files lack TEXT nodes
+            nm = node.get("name")
+            if isinstance(nm, str):
+                add_clean(nm)
             for v in node.values():
                 if isinstance(v, (dict, list)):
                     walk(v)
@@ -178,14 +194,16 @@ def extract_figma_text(figma_json: dict) -> list[str]:
                 walk(item)
 
     walk(figma_json)
-    # de-dup preserve order
+
+    # de-dup preserve order + apply validator
     seen, uniq = set(), []
     for s in out:
-        if s not in seen:
-            seen.add(s); uniq.append(s)
+        if _valid_figma_label(s):
+            if s not in seen:
+                seen.add(s); uniq.append(s)
     return uniq
 
-# ============== RHS field universe (generic) ==============
+# -------------------- RHS field universe --------------------
 def extract_all_keys(data, prefix=""):
     keys = set()
     if isinstance(data, dict):
@@ -199,13 +217,9 @@ def extract_all_keys(data, prefix=""):
     return keys
 
 def field_leaf(path: str) -> str:
-    """
-    Generic leaf: prefer token after last '.properties.'; otherwise last dotted token.
-    Ignore custom extension suffixes like 'x-...'.
-    """
+    """Prefer token after last '.properties.'; else last dotted token; strip x- extensions."""
     if not isinstance(path, str) or not path: return ""
     parts = path.split(".")
-    # prefer schema-ish properties
     try:
         last_prop = max(i for i, t in enumerate(parts) if t == "properties")
         j = last_prop + 1
@@ -217,35 +231,52 @@ def field_leaf(path: str) -> str:
             leaf = parts[-1]
     except ValueError:
         leaf = parts[-1]
-    # strip extension-like tokens
     if leaf.startswith("x-"):
-        # walk back to previous non x- token
         for tok in reversed(parts):
             if not tok.startswith("x-"):
                 leaf = tok
                 break
     return leaf
 
+# ---- schema aliasing: turn long OpenAPI-ish ids into human words ----
+def _id_tokens(s: str):
+    s1 = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
+    return [t for t in re.split(r"[^A-Za-z0-9]+", s1) if t]
+
+def _schema_alias(s: str) -> str:
+    toks = _id_tokens(s)
+    drop = {"data","dy","homepage","home","mgr","vbc","get","one","all","put","post",
+            "del","delete","response","resp","bo","id","list","key","schema","schemas","components"}
+    core = [t for t in toks if t.lower() not in drop]
+    low = [t.lower() for t in toks]
+    if "sales" in low and "dashboard" in low:
+        return "Sales Dashboard"
+    if core:
+        head = [core[0].capitalize()] + [c.lower() for c in core[1:3]]
+        return " ".join(head)
+    return s
+
 def collect_rhs_paths_and_leaves(data):
     paths = sorted(list(extract_all_keys(data)))
     meta = []
     for p in paths:
-        meta.append({"path": p, "leaf": field_leaf(p)})
+        leaf = field_leaf(p)
+        if not leaf: 
+            continue
+        meta.append({"path": p, "leaf": leaf})
+        alias = _schema_alias(leaf)
+        if alias and alias != leaf:
+            meta.append({"path": p, "leaf": alias, "alias_of": leaf})
     return meta
 
 def build_faiss_on_leaves(rhs_meta):
     docs = []
     for m in rhs_meta:
-        # FAISS over leaf names, but store full path in metadata
         docs.append(Document(page_content=m["leaf"], metadata={"path": m["path"]}))
     return FAISS.from_documents(docs, OllamaEmbeddings(model=OLLAMA_MODEL))
 
-# ============== LLM prompt (minimal change) ==============
+# -------------------- LLM prompt --------------------
 def make_prompt_from_figma(labels: list[str]) -> str:
-    """
-    Keep your existing behavior: choose ONLY from provided labels.
-    We do not bias with any hard-coded header lists.
-    """
     blob = "\n".join(f"- {t}" for t in labels)
     incorrect = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
     correct   = set(p for pats in feedback_memory["correct"].values()   for p in pats)
@@ -262,7 +293,6 @@ Rules (follow ALL strictly):
 - DO NOT select labels that contain an underscore "_" or a hash "#".
 - Avoid generic technical/container words such as: components, schemas, properties, paths, tags, servers, definitions, refs.
 
-
 {avoid}
 {prefer}
 
@@ -272,29 +302,10 @@ Candidate labels:
 {blob}
 """.strip()
 
-# --- add near your helpers ---
-
-# Common UI filler words that shouldn't block semantic matching
-_UI_STOP = {"dashboard", "page", "view", "panel", "tile", "card", "module", "section"}
-
-def _tokens_core(s: str) -> list[str]:
-    if not isinstance(s, str): 
-        return []
-    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)     # camelCase -> camel Case
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)       # keep alnum separators
-    return [t for t in s.strip().lower().split() if t]
-
-def _tokens(s: str) -> list[str]:
-    toks = _tokens_core(s)
-    # remove UI filler tokens (improves "Sales Dashboard" -> {"sales"})
-    return [t for t in toks if t not in _UI_STOP]
-
-# Light aliasing to improve overlap without hard-coding outputs
+# -------------------- Matching helpers --------------------
 def _header_aliases(h: str) -> list[str]:
     hn = _norm(h)
     aliases = [hn]
-    # map a few short, safe, semantics-preserving aliases
-    # (kept generic; does NOT inject any header not present in figma list)
     map_simple = {
         "at risk": "risk",
         "risk status": "risk",
@@ -307,34 +318,22 @@ def _header_aliases(h: str) -> list[str]:
     }
     if hn in map_simple:
         aliases.append(map_simple[hn])
-    # If header is two words and second is a filler, keep the first
     ht = _tokens_core(hn)
     if len(ht) == 2 and ht[1] in _UI_STOP:
         aliases.append(ht[0])
-    return list(dict.fromkeys(aliases))  # dedupe, keep order
+    return list(dict.fromkeys(aliases))
 
-# --- tweak the default to be slightly more permissive (was 0.34) ---
 def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.30) -> bool:
-    """
-    Keep a header only if it has plausible affinity to at least one RHS leaf:
-    - exact leaf match (case-insensitive), or
-    - substring either way (header in leaf or leaf in header), or
-    - Jaccard token overlap >= min_overlap.
-    """
     if not isinstance(header, str) or not header.strip():
         return False
-
-    # Try raw and alias variants (e.g., "At Risk" -> "risk"; "Sales Dashboard" -> "sales")
     candidates = _header_aliases(header)
 
     for cand in candidates:
         htoks = set(_tokens(cand))
         hnorm = _norm(cand)
-
         for m in rhs_meta:
             leaf = m.get("leaf") or ""
-            if not leaf:
-                continue
+            if not leaf: continue
             ln = _norm(leaf)
             ltoks = set(_tokens(leaf))
 
@@ -342,14 +341,11 @@ def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.3
                 return True
             if hnorm and (hnorm in ln or ln in hnorm):
                 return True
-            if htoks and ltoks:
-                j = _jaccard(htoks, ltoks)
-                if j >= min_overlap:
-                    return True
+            if htoks and ltoks and _jaccard(htoks, ltoks) >= min_overlap:
+                return True
     return False
 
 def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int = 3):
-    # consider raw + alias variants
     variants = _header_aliases(header)
     scored = []
 
@@ -358,17 +354,12 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
         htoks = set(_tokens(hcand))
         ln = _norm(leaf)
         ltoks = set(_tokens(leaf))
-
-        if ln == hnorm:
-            return 0.0
-        if hnorm and (hnorm in ln or ln in hnorm):
-            return 0.25
+        if ln == hnorm: return 0.0
+        if hnorm and (hnorm in ln or ln in hnorm): return 0.25
         j = _jaccard(htoks, ltoks)
-        if j > 0:
-            return 1.0 - min(0.99, j)
+        if j > 0: return 1.0 - min(0.99, j)
         return None
 
-    # lexical passes win first
     for m in rhs_meta:
         leaf = m.get("leaf") or ""
         best = None
@@ -382,14 +373,11 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
     scored.sort(key=lambda x: x[0])
     out = [{"field": p, "field_short": leaf, "score": float(s)} for (s, p, leaf) in scored[:k]]
 
-    # FAISS backfill (still helps for fuzzy neighbors)
     if len(out) < k:
         try:
-            # Try all variants; prefer closest overall
             acc = []
             for hc in variants:
                 acc.extend(field_index.similarity_search_with_score(hc, k=k*2))
-            # de-dup by path with conservative distance bump
             seen_paths = {x["field"] for x in out}
             for doc, dist in acc:
                 pth = doc.metadata.get("path", "")
@@ -406,7 +394,7 @@ def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int =
     out.sort(key=lambda x: x.get("score", 1e9))
     return out[:k]
 
-
+# -------------------- Ollama info --------------------
 def get_ollama_info():
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
@@ -420,7 +408,7 @@ def get_ollama_info():
 def api_ollama_info():
     return jsonify(get_ollama_info())
 
-# ============== API: find_fields ==============
+# -------------------- API: find_fields --------------------
 @app.post("/api/find_fields")
 def api_find_fields():
     try:
@@ -433,22 +421,20 @@ def api_find_fields():
         figma_json = force_decode(raw["figma_json"])
         data_json  = force_decode(raw["data_json"])
 
-        # Build RHS universe (paths + leaves) and FAISS over leaves (for ranking/matching only)
+        # RHS universe + FAISS index (with alias leaves)
         rhs_meta = collect_rhs_paths_and_leaves(data_json)
         field_index = build_faiss_on_leaves(rhs_meta)
 
-        # Figma labels (TEXT nodes only), shape-filtered
+        # Figma harvest (TEXT preferred; fallback to 'name' fields cleaned)
         figma_labels = extract_figma_text(figma_json)
-        figma_labels = [t for t in figma_labels if _valid_figma_label(t)]
 
-                # --- EMERGENCY FIGMA FALLBACK: if TEXT-node harvest is empty, sweep all strings ---
+        # If harvesting totally failed, keep your old "emergency" sweep (strings anywhere)
         if not figma_labels:
             def _harvest_strings(node, bag):
                 if isinstance(node, dict):
                     for v in node.values():
                         if isinstance(v, str):
                             s = v.strip()
-                            # keep short-ish, header-ish strings only
                             if 1 <= len(s) <= 40 and _is_headerish(s):
                                 bag.append(s)
                         elif isinstance(v, (dict, list)):
@@ -459,80 +445,62 @@ def api_find_fields():
 
             _tmp = []
             _harvest_strings(figma_json, _tmp)
-
-            # de-dup and basic hygiene: no underscores / hashes / generic tech terms
-            _BAD_TERMS = {
-                "components", "schemas", "properties", "responses",
-                "schema", "paths", "tags", "servers", "definitions", "refs"
-            }
             seen = set()
             figma_labels = []
+            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
             for s in _tmp:
-                if s in seen:
+                if s in seen: 
                     continue
                 seen.add(s)
-                if "_" in s or "#" in s:
+                if "_" in s or "#" in s: 
                     continue
-                if _norm(s) in _BAD_TERMS:
+                if _norm(s) in _BAD_TERMS: 
                     continue
-                figma_labels.append(s)
-        # --- END EMERGENCY FIGMA FALLBACK ---
+                if _valid_figma_label(s):
+                    figma_labels.append(s)
 
+        # NEW: if figma is too sparse (≤2), enrich with short RHS aliases containing any figma token
+        if len(figma_labels) <= 2:
+            base_tokens = set()
+            for lbl in figma_labels:
+                base_tokens.update(_tokens(lbl))
+            enriched = []
+            seen_add = set()
+            for m in rhs_meta:
+                leaf = (m.get("leaf") or "").strip()
+                if not leaf: 
+                    continue
+                if base_tokens & set(_tokens(leaf)):
+                    if 1 <= len(leaf.split()) <= 3 and len(leaf) <= 24 and _is_headerish(leaf):
+                        if leaf not in seen_add:
+                            seen_add.add(leaf)
+                            enriched.append(leaf)
+            def _shape_score_light(s: str) -> float:
+                parts = s.strip().split()
+                L = sum(len(p) for p in parts)
+                alpha = sum(c.isalpha() for c in s)
+                shout = 1.0 if _is_mostly_upper(s) else 0.0
+                return L - 2.0*shout - 0.5*abs(len(parts)-2) - 0.25*alpha
+            enriched = sorted(enriched, key=_shape_score_light)
+            figma_labels = figma_labels + [e for e in enriched if e not in figma_labels][:12]
 
-        # Drop labels previously marked incorrect (candidate filter)
-       # Drop labels previously marked incorrect
+        # Drop labels marked incorrect
         blocked_norm = build_blocklist()
         figma_labels = [lbl for lbl in figma_labels if _norm(lbl) not in blocked_norm]
-  # ---- Figma-only sanitization (keeps us away from IDs, long codes, UI chrome) ----
-        _BAD_TERMS = {
-            "components","schemas","properties","responses","schema",
-            "paths","tags","servers","definitions","refs","required","type"
-        }
 
-        def _looks_like_id(s: str) -> bool:
-            if not isinstance(s, str): 
-                return False
-            t = s.strip()
-            # long hex/base62-ish tokens or UUID-ish bits
-            if re.fullmatch(r"[A-Za-z0-9_-]{10,}", t): 
-                return True
-            if re.search(r"\b[0-9a-f]{8}\b", t, re.I): 
-                return True
-            return False
-        
-        def _valid_figma_label(t: str) -> bool:
-            if not isinstance(t, str) or not t.strip():
-                return False
-            s = t.strip()
-            if _looks_like_id(s):
-                return False
-            # drop anything with numbers (usually not column headers), underscores, or hashes
-            if any(ch.isdigit() for ch in s): 
-                return False
-            if "_" in s or "#" in s: 
-                return False
-            # drop generic container/tech terms
-            if _norm(s) in _BAD_TERMS: 
-                return False
-            return _is_headerish(s)
-        
+        # Guard again with validator (cheap)
         figma_labels = [t for t in figma_labels if _valid_figma_label(t)]
 
-
-        # Helper filters (keep these figma-only)
-        _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
-
+        # Helper
+        _BAD_TERMS = {"components","schemas","properties","responses","schema","paths","tags","servers","definitions","refs","required","type"}
         def _valid_header(s: str) -> bool:
-            if not isinstance(s, str) or not s.strip():
-                return False
+            if not isinstance(s, str) or not s.strip(): return False
             t = s.strip()
-            if "_" in t or "#" in t:
-                return False
-            if _norm(t) in _BAD_TERMS:
-                return False
+            if "_" in t or "#" in t: return False
+            if _norm(t) in _BAD_TERMS: return False
             return True
 
-        # LLM selection from candidate labels (STRICTLY from figma_labels)
+        # Try LLM strictly on figma_labels
         headers = []
         if figma_labels:
             prompt = make_prompt_from_figma(figma_labels)
@@ -564,15 +532,13 @@ def api_find_fields():
                             if _valid_figma_label(cand):
                                 headers.append(cand)
 
-
-        # Fallback (figma-only): rank figma labels by (affinity first, then shape)
+        # Fallback: rank figma labels (affinity then shape)
         if not headers:
             def _shape_score(s: str) -> float:
                 parts = s.strip().split()
                 L = sum(len(p) for p in parts)
                 alpha = sum(c.isalpha() for c in s)
                 shout = 1.0 if _is_mostly_upper(s) else 0.0
-                # lower is better
                 return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
 
             fig_sorted = sorted(
@@ -585,9 +551,9 @@ def api_find_fields():
 
             pick, seen_local = [], set()
             for x in fig_sorted:
-                if _norm(x) in blocked_norm:
+                if _norm(x) in blocked_norm: 
                     continue
-                if x in seen_local:
+                if x in seen_local: 
                     continue
                 seen_local.add(x)
                 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20):
@@ -595,11 +561,9 @@ def api_find_fields():
                 if len(pick) >= 8:
                     break
 
-            # If affinity didn’t yield 8 yet, top up from remaining FIGMA labels (no RHS sourcing)
             if len(pick) < 8:
-                # first, allow weaker affinity
                 for x in fig_sorted:
-                    if x in pick:
+                    if x in pick: 
                         continue
                     if has_rhs_affinity(x, rhs_meta, min_overlap=0.10):
                         pick.append(x)
@@ -607,33 +571,28 @@ def api_find_fields():
                         break
 
             if len(pick) < 8:
-                # finally, fill by best shape only (still figma-only, valid, not blocked)
                 for x in fig_sorted:
-                    if x in pick:
+                    if x in pick: 
                         continue
                     pick.append(x)
                     if len(pick) >= 8:
                         break
 
-            # If still nothing (extreme edge), salvage 1 figma label
             if not pick and figma_labels:
                 pick = [next((z for z in figma_labels if _valid_header(z)), figma_labels[0])]
 
             headers = pick
 
-        # Gate headers by RHS affinity (keep quality) but do not let it drop below 8
+        # Gate by RHS affinity; keep ≥8 total via relax/shape top-up
         gated = [h for h in headers if has_rhs_affinity(h, rhs_meta)]
         if len(gated) < 8:
-            # relax gating using remaining figma-only candidates
             remaining = [x for x in figma_labels if x not in gated and _valid_header(x)]
-            # prefer weak affinity first
             weak_aff = [x for x in remaining if has_rhs_affinity(x, rhs_meta, min_overlap=0.10)]
             for x in weak_aff:
                 if x not in gated:
                     gated.append(x)
                 if len(gated) >= 8:
                     break
-            # then shape-only if needed
             if len(gated) < 8:
                 def _shape_score2(s: str) -> float:
                     parts = s.strip().split()
@@ -647,16 +606,11 @@ def api_find_fields():
                     if len(gated) >= 8:
                         break
 
-        # de-dup, final figma-only validity + blocklist
-        # ------------- consolidate, ensure 8 figma-only headers -------------
-# keep only valid, non-blocked, dedup
-        # ------------- consolidate, ensure 8 figma-only headers -------------
-        # keep only valid, non-blocked, de-dup
+        # dedupe + root-word dedupe
         seen = set()
         headers = [h for h in (gated if 'gated' in locals() else headers)
                    if _valid_figma_label(h) and _norm(h) not in blocked_norm and not (h in seen or seen.add(h))]
 
-        # root-word dedupe to avoid many "Account ...", "Opportunity ..." variants
         def _bucket_key(h: str) -> str:
             toks = _tokens(h)
             return toks[0] if toks else _norm(h)
@@ -670,35 +624,29 @@ def api_find_fields():
             deduped.append(h)
         headers = deduped
 
-        # If we have fewer than 8, top up strictly from remaining FIGMA labels (no RHS sourcing)
+        # top up to 8
         def _shape_score(s: str) -> float:
             parts = s.strip().split()
             L = sum(len(p) for p in parts)
             alpha = sum(c.isalpha() for c in s)
             shout = 1.0 if _is_mostly_upper(s) else 0.0
-            # lower is better
             return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha
 
         if len(headers) < 8:
-            # candidate pool: figma-only, valid, not blocked, not already chosen
-            pool = [x for x in figma_labels
-                    if x not in headers and _valid_figma_label(x) and _norm(x) not in blocked_norm]
-
-            # (a) prefer weak RHS-affinity first (helps quality but doesn't block us)
+            pool = [x for x in figma_labels if x not in headers and _valid_figma_label(x) and _norm(x) not in blocked_norm]
             pool_aff = sorted(pool, key=lambda x: (
                 0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.10) else 1,
                 _shape_score(x)
             ))
             for x in pool_aff:
                 r = _bucket_key(x)
-                if r in kept_roots:
+                if r in kept_roots: 
                     continue
                 headers.append(x)
                 kept_roots.add(r)
                 if len(headers) >= 8:
                     break
 
-            # (b) still short? fill purely by shape (still figma-only & new root words)
             if len(headers) < 8:
                 pool_shape = sorted([x for x in pool if _bucket_key(x) not in kept_roots], key=_shape_score)
                 for x in pool_shape:
@@ -707,111 +655,18 @@ def api_find_fields():
                     if len(headers) >= 8:
                         break
 
-        # absolute last resort: if still empty, pick up to 8 best-shaped figma labels
-        if not headers:
+        if not headers and figma_labels:
             fallback = sorted(figma_labels, key=_shape_score)
             headers = [x for x in fallback if _valid_figma_label(x)][:8]
 
-        # keep global cap
         headers = headers[:15]
-        # ------------- end ensure 8 -------------
 
-# ------------- end ensure 8 -------------
-
-        # -------- end Figma-only header selection --------------------------------
-                # -------- FINAL GUARANTEE: if still empty, take top 8 from figma_json --------
-               # -------- FINAL GUARANTEE: if still empty, take top 8 from figma_json --------
-        if not headers:
-            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
-
-            # If figma_labels is empty, permissively harvest strings from the whole figma JSON
-            if not figma_labels:
-                def _harvest_strings(node, bag):
-                    if isinstance(node, dict):
-                        for v in node.values():
-                            if isinstance(v, str):
-                                sv = v.strip()
-                                if 1 <= len(sv) <= 40:
-                                    bag.append(sv)
-                            elif isinstance(v, (dict, list)):
-                                _harvest_strings(v, bag)
-                    elif isinstance(node, list):
-                        for it in node:
-                            _harvest_strings(it, bag)
-
-                tmp = []
-                _harvest_strings(figma_json, tmp)
-                # de-dup
-                seen_tmp = set()
-                figma_labels = []
-                for s in tmp:
-                    if s and s not in seen_tmp:
-                        seen_tmp.add(s)
-                        figma_labels.append(s)
-
-            def _valid_figma_label_local(t: str) -> bool:
-                if not isinstance(t, str) or not t.strip():
-                    return False
-                s = t.strip()
-                if any(ch.isdigit() for ch in s):
-                    return False
-                if "_" in s or "#" in s:
-                    return False
-                if _norm(s) in _BAD_TERMS:
-                    return False
-                return _is_headerish(s)
-
-            def _pure_figma_score(s: str) -> float:
-                """Lower is better: short, 1–2 words, more alpha, not shouty."""
-                s2 = s.strip()
-                parts = s2.split()
-                L = sum(len(p) for p in parts)
-                alpha = sum(c.isalpha() for c in s2)
-                shout = 1.0 if _is_mostly_upper(s2) else 0.0
-                word_bonus = -0.75 if 1 <= len(parts) <= 2 else 0.0
-                return L - 2.0*shout - 0.5*abs(len(parts) - 2) - 0.25*alpha + word_bonus
-
-            # candidate pool from (possibly re-built) figma_labels only
-            pool = [t for t in figma_labels if _valid_figma_label_local(t) and _norm(t) not in blocked_norm]
-            pool_sorted = sorted(pool, key=_pure_figma_score)
-
-            # dedupe by root word while filling up to 8
-            def _bucket_key(h: str) -> str:
-                toks = _tokens(h)
-                return toks[0] if toks else _norm(h)
-
-            headers = []
-            seen_roots = set()
-            for cand in pool_sorted:
-                r = _bucket_key(cand)
-                if r in seen_roots:
-                    continue
-                seen_roots.add(r)
-                headers.append(cand)
-                if len(headers) >= 8:
-                    break
-
-            # if still short, fill without root dedupe
-            if len(headers) < 8:
-                for cand in pool_sorted:
-                    if cand in headers:
-                        continue
-                    headers.append(cand)
-                    if len(headers) >= 8:
-                        break
-
-            # absolute last-resort: any strings we can find in figma (already de-duped above)
-            if not headers and figma_labels:
-                headers = figma_labels[:8]
-        # -------- END FINAL GUARANTEE --------
-
-
-        # Build matches (lexical first, FAISS as backstop)
+        # Build matches
         matches = {}
         for h in headers:
             matches[h] = rank_candidates_for(h, rhs_meta, field_index, k=3)
 
-        # persist context for feedback
+        # Save feedback context
         feedback_memory["last_run"] = {}
         for h in headers:
             feedback_memory["correct"].setdefault(h, []).append(h)
@@ -839,8 +694,7 @@ def api_find_fields():
     except Exception as e:
         return jsonify({"error": "Find fields failed", "details": str(e)}), 500
 
-
-# ============== API: feedback ==============
+# -------------------- API: feedback --------------------
 @app.post("/api/feedback")
 def api_feedback():
     try:
@@ -858,7 +712,6 @@ def api_feedback():
                 if p not in feedback_memory["correct"][header]:
                     feedback_memory["correct"][header].append(p)
         else:
-            # 🔴 NEW: move header & its patterns to incorrect (permanent block)
             feedback_memory["incorrect"].setdefault(header, [])
             if header not in feedback_memory["incorrect"][header]:
                 feedback_memory["incorrect"][header].append(header)
@@ -901,13 +754,14 @@ Sample UI labels:
     except Exception as e:
         return jsonify({"error": "Feedback failed", "details": str(e)}), 500
 
-# ============== Root/Runner ==============
+# -------------------- Root --------------------
 @app.get("/")
 def home():
     return jsonify({
         "message": "POST /api/find_fields with {figma_json, data_json}. "
-                   "Labels come from TEXT nodes only; headers gated by RHS affinity (no hard-coding). "
-                   "Matches are ranked lexically on RHS leaf names with FAISS as backstop. "
+                   "Labels come from TEXT nodes first; if absent, we clean Figma 'name' fields. "
+                   "If Figma is sparse, we enrich with short RHS aliases that include Figma tokens. "
+                   "Matches are ranked lexically on RHS leaves (with schema aliases) and FAISS as backstop. "
                    "POST /api/feedback with {header, status}. Add ?debug=1 to inspect."
     })
 

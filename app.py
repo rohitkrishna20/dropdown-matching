@@ -109,12 +109,16 @@ def _valid_figma_label(t: str) -> bool:
     if not isinstance(t, str): return False
     s = t.strip()
     if not s: return False
+    # drop obvious IDs / codes / refs
     if _looks_like_hex_id(s) or _looks_like_base62_id(s): return False
+    # shape constraints for column headers
     if "_" in s or "#" in s: return False
-    if any(ch.isdigit() for ch in s): return False
-    if len(s) > 24: return False
-    if len(s.split()) > 3: return False
+    # allow hyphens (Figma titles often have en/em dashes)
+    # if "-" in s: return False   # ← removed
+    if len(s) > 30: return False
+    if len(s.split()) > 4: return False
     return _is_headerish(s)
+
 
 # -------------------- Feedback blocklist --------------------
 def build_blocklist() -> set:

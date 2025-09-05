@@ -344,5 +344,14 @@ def root():
     return "OK", 200
 
 if __name__ == "__main__":
-    # Run:  FLASK_ENV=development python app.py
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    import os, sys
+    port = int(os.environ.get("PORT", "5000"))
+    # allow --port / -p on the command line
+    for i, a in enumerate(sys.argv):
+        if a in ("--port", "-p") and i + 1 < len(sys.argv):
+            try:
+                port = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+            break
+    app.run(host="0.0.0.0", port=port, debug=True)

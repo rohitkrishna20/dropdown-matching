@@ -436,14 +436,14 @@ def ollama_headers_and_mapping(
             "USER_GUIDANCE": (user_prompt or "").strip()
         }
        system_msg = (
-    "You extract UI section headers from a Figma export and map them to OpenAPI schema fields.\n"
-    "STRICT RULES:\n"
-    "1) Choose headers ONLY from CANDIDATE_HEADERS by returning their 'id' values (H1,H2,...). Do not invent.\n"
-    "2) For each chosen header id, select EXACTLY 3 field ids ONLY from SCHEMA_FIELDS (F1,F2,...) if at least 3 exist.\n"
-    "   If fewer than 3 fields exist in SCHEMA_FIELDS, return as many as exist (2 or 1).\n"
-    "3) If unsure which fields to choose, prefer the ones suggested in SEED_MAPPING (ids) for that header.\n"
-    "4) Output STRICT JSON: {\"headers\":[\"H#\", ...], \"mapping\":{\"H#\":[\"F#\",\"F#\",\"F#\"], ...}}\n"
-    "5) No prose or markdown. Only the JSON object.\n"
+            "You extract UI section headers from a Figma export and map them to OpenAPI schema fields.\n"
+            "STRICT RULES:\n"
+            "1) Choose headers ONLY from CANDIDATE_HEADERS by returning their 'id' values (H1,H2,...). Do not invent.\n"
+            "2) For each chosen header id, select EXACTLY 3 field ids ONLY from SCHEMA_FIELDS (F1,F2,...) if at least 3 exist.\n"
+            "   If fewer than 3 fields exist in SCHEMA_FIELDS, return as many as exist (2 or 1).\n"
+            "3) If unsure which fields to choose, prefer the ones suggested in SEED_MAPPING (ids) for that header.\n"
+            "4) Output STRICT JSON: {\"headers\":[\"H#\", ...], \"mapping\":{\"H#\":[\"F#\",\"F#\",\"F#\"], ...}}\n"
+            "5) No prose or markdown. Only the JSON object.\n"
 )
         user_msg = (
             "Follow the rules. Consider SEED_MAPPING and USER_GUIDANCE as hints.\n\n"

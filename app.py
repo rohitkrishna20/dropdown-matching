@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 import json, re, os, sys
 from typing import Any, Dict, List, Iterable, Tuple, Optional
 
-# Optional: local open-source LLM via Ollama (used only for re-ranking)
+# Optional: local open-source LLM via Ollama (used for extraction/reranking)
 try:
     import ollama
     OLLAMA_OK = True
@@ -100,7 +100,7 @@ def force_decode_any(x: Any) -> Any:
     if isinstance(x, (bytes, bytearray)):
         x = x.decode("utf-8", errors="ignore")
     if isinstance(x, str):
-        return loose_json_loads(x)
+        return loose_json_loads(s=x)
     raise ValueError("Unsupported payload type.")
 
 # =========================== Heuristics: classify Figma vs OpenAPI ===========================
@@ -116,38 +116,41 @@ def _walk(node: Any) -> Iterable[Dict[str, Any]]:
 
 def looks_like_figma(obj: Any) -> bool:
     """
-    MUCH looser: accept lowercase 'type', plugin shapes, columns with header/headerName,
-    typical Figma-ish keys like absoluteBoundingBox, fills, strokes, style, etc.
+    Looser Figma detection:
+    - accepts lowercase 'type'
+    - detects TEXT nodes, 'characters' fields
+    - tolerates plugin/table exports (columns/header/headerName/title/label/name)
+    - recognizes common Figma node keys (absoluteBoundingBox, fills, strokes, style, layoutMode, etc.)
     """
     try:
         for n in _walk(obj):
-            # 1) node type hints (case-insensitive, partial matches)
-            t = n.get("type")
-            if isinstance(t, str):
-                tl = t.lower()
-                if any(tok in tl for tok in ("text", "document", "frame", "page", "group", "component")):
-                    return True
+            if not isinstance(n, dict):
+                continue
 
-            # 2) canonical Figma text/content signal
+            # type hints (case-insensitive, partial)
+            t = n.get("type")
+            if isinstance(t, str) and any(tok in t.lower() for tok in ("text","document","frame","page","group","component")):
+                return True
+
+            # canonical figma text/content
             if isinstance(n.get("characters"), (str, int, float)):
                 return True
 
-            # 3) table-like structures many plugins export
+            # table-like structures many plugins export
             cols = n.get("columns")
             if isinstance(cols, list):
                 for col in cols:
-                    if isinstance(col, dict) and any(k in col for k in ("header", "headerName", "name", "title", "field")):
+                    if isinstance(col, dict) and any(k in col for k in ("header","headerName","name","title","field")):
                         return True
-                # columns may be simple arrays of strings as headers
                 if any(isinstance(x, str) for x in cols):
                     return True
 
-            # 4) typical Figma keys present in nodes
-            if any(k in n for k in ("absoluteBoundingBox", "strokes", "fills", "style", "layoutMode", "constraints")):
+            # typical figma keys on nodes
+            if any(k in n for k in ("absoluteBoundingBox","strokes","fills","style","layoutMode","constraints","effects","exportSettings","imageRef")):
                 return True
 
-            # 5) label-ish keys with string values
-            for k in ("text", "content", "title", "label", "heading", "name", "header", "headerName"):
+            # label-ish keys with string values
+            for k in ("text","content","title","label","heading","name","header","headerName"):
                 v = n.get(k)
                 if isinstance(v, str) and v.strip():
                     return True
@@ -203,64 +206,127 @@ def _header_likeliness(s: str) -> float:
     score += min(0.4, 0.1 * sum(1 for t in toks if len(t) >= 3))
     return score
 
-HEADER_VALUE_KEYS = {"characters","name","text","content","title","label","heading","header","headerName","field"}
+# ---- helpers to turn keys/paths into phrases
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NONWORD_SPLIT = re.compile(r"[^\w]+")
+
+def _to_phrase(s: str) -> str:
+    """Turn keys like 'DY_HomepageMgr_SalesDashboard_VBC' into 'DY Homepage Mgr Sales Dashboard VBC'."""
+    # drop id/hash suffixes like '#1234:0'
+    s = re.sub(r"#\d+:\d+", " ", s)
+    # split on non-word
+    parts = _NONWORD_SPLIT.split(s)
+    parts2 = []
+    for p in parts:
+        if not p:
+            continue
+        # split camelCase / PascalCase
+        parts2 += _CAMEL_SPLIT.split(p)
+    phrase = " ".join(parts2)
+    # collapse spaces
+    phrase = re.sub(r"\s+", " ", phrase).strip()
+    return phrase
+
+def _prefer_longer_phrases(cands: List[str]) -> List[str]:
+    """If 'Sales Dashboard' and 'Dashboard' both exist, prefer the longer and drop clear subsets."""
+    keep = []
+    lowered = [c.lower() for c in cands]
+    for i, c in enumerate(cands):
+        cl = lowered[i]
+        drop = False
+        for j, d in enumerate(cands):
+            if i == j:
+                continue
+            dl = lowered[j]
+            # if c is a strict substring of d and d is at least 2 tokens longer, drop c
+            if cl != dl and cl in dl and len(_tokens(d)) >= len(_tokens(c)) + 1:
+                drop = True
+                break
+        if not drop:
+            keep.append(c)
+    return keep
 
 def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
+    """
+    Harvest headers from:
+      - TEXT.characters (canonical)
+      - common label keys: name/text/content/title/label/heading/header/headerName/field
+      - columns[] (header/headerName/name/title or plain strings)
+      - ALSO: from *keys themselves* by splitting delimiters & camelCase, then scoring like headers
+    """
     cand: List[str] = []
 
-    def add_if_good(val: Any):
+    def consider(val: Any):
         if isinstance(val, str):
             s = val.strip()
-            if s and s.lower() != "text" and not _is_numbery(s) and _header_likeliness(s) >= 0.45:
-                cand.append(s)
-        elif isinstance(val, (int, float)):
-            # ignore numbers
-            pass
+            if s and s.lower() != "text" and not _is_numbery(s):
+                if _header_likeliness(s) >= 0.45:
+                    cand.append(s)
         elif isinstance(val, list):
             for x in val:
-                add_if_good(x)
+                consider(x)
+
+    HEADER_VALUE_KEYS = {"characters","name","text","content","title","label","heading","header","headerName","field"}
 
     for node in _walk(figma):
         if not isinstance(node, dict):
             continue
 
-        # 1) canonical text/name keys
+        # 1) values in known label-ish fields
         for k in HEADER_VALUE_KEYS:
             if k in node:
-                add_if_good(node.get(k))
+                consider(node.get(k))
 
-        # 2) columns[] with header-ish keys or plain strings
+        # 2) table-like 'columns'
         cols = node.get("columns")
         if isinstance(cols, list):
             for col in cols:
                 if isinstance(col, dict):
-                    for kk in ("header", "headerName", "name", "title"):
+                    for kk in ("header","headerName","name","title"):
                         if kk in col:
-                            add_if_good(col.get(kk))
+                            consider(col.get(kk))
                 elif isinstance(col, str):
-                    add_if_good(col)
+                    consider(col)
 
-        # 3) any key that *contains* 'header' or 'title'
-        for k, v in node.items():
-            if isinstance(k, str) and any(tag in k.lower() for tag in ("header", "title")):
-                add_if_good(v)
+        # 3) mine *keys* themselves (convert to phrases)
+        for k in list(node.keys()):
+            if not isinstance(k, str):
+                continue
+            # ignore very technical keys
+            if k in {"id","type","class","href","url","key"}:
+                continue
+            phrase = _to_phrase(k)
+            # e.g., '/data/DY HomePage ... SalesDashboard VBC/' -> 'data DY Home Page ... Sales Dashboard VBC'
+            phrase = phrase.strip(" /")
+            if phrase and _header_likeliness(phrase) >= 0.50:
+                cand.append(phrase)
 
-    # Emergency sweep if nothing found: harvest short string values from benign keys
+    # Emergency: if nothing collected, sweep short strings in nodes
     if not cand:
-        benign = {"placeholder","ariaLabel","alt","value","textValue"}
+        benign_skip = {"id","type","class","href","url","key"}
         for node in _walk(figma):
             if isinstance(node, dict):
                 for k, v in node.items():
-                    if isinstance(v, str) and k not in {"id","type","class","href","url"} | benign:
-                        add_if_good(v)
+                    if k in benign_skip:
+                        continue
+                    if isinstance(v, str):
+                        consider(v)
 
-    # dedupe preserve order
-    seen, out = set(), []
-    for h in cand:
-        key = re.sub(r"\s+", " ", h).lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(h)
+    # normalize, dedupe, and prefer longer composites over their subsets
+    norm = lambda x: re.sub(r"\s+", " ", x).strip()
+    uniq = []
+    seen = set()
+    for s in cand:
+        ss = norm(s)
+        if ss.lower() not in seen:
+            seen.add(ss.lower())
+            uniq.append(ss)
+
+    uniq = _prefer_longer_phrases(uniq)
+
+    # optional: cap to a reasonable number (top by header-likeliness)
+    uniq_scored = sorted([(s, _header_likeliness(s)) for s in uniq], key=lambda t: t[1], reverse=True)
+    out = [s for s, _ in uniq_scored[:50]]  # keep top 50 headers max
     return out
 
 def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
@@ -315,7 +381,7 @@ def top_k_fields(header: str, fields: List[str], k: int = 3) -> List[str]:
     ranked = sorted(fields, key=lambda f: field_score(header, f), reverse=True)
     return ranked[:k]
 
-# =========================== Optional LLM re-rank ===========================
+# =========================== Optional classic LLM re-rank ===========================
 
 LLM_SYSTEM = (
     "You map UI headers to schema fields. Rules:\n"
@@ -353,6 +419,88 @@ def refine_with_llm(model: str, headers: List[str], fields: List[str], draft: Di
                     lst.append(x)
             clean[h] = lst
         return clean
+    except Exception:
+        return None
+
+# =========================== LLM-first extraction (primary) ===========================
+
+LLM_SYSTEM_FULL = (
+    "You extract UI section headers from a Figma export and map them to OpenAPI schema fields.\n"
+    "STRICT RULES:\n"
+    "1) Headers MUST be chosen ONLY from FIGMA_CANDIDATES (exact strings). Do not invent.\n"
+    "2) Prefer section-level labels, widget titles, and business column headers. "
+    "   Ignore technical/atomic UI labels like Icon, Label, Primary, Secondary, Width, Height, etc.\n"
+    "3) For each chosen header, pick up to 3 schema fields ONLY from SCHEMA_FIELDS by semantic relevance.\n"
+    "4) Output STRICT JSON: {\"headers\":[...], \"mapping\":{\"<Header>\":[\"<field>\",...]}}\n"
+    "5) If no good fields for a header, use [] for that header.\n"
+    "6) No prose, no markdown, no explanations — only the JSON object.\n"
+)
+
+def _limit_list(a: List[str], max_items: int) -> List[str]:
+    # Keep the most informative strings first by rough signal: longer & ‘header-likeliness’
+    scored = [(s, _header_likeliness(s) + 0.1*len(_tokens(s))) for s in a]
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return [s for s,_ in scored[:max_items]]
+
+def ollama_headers_and_mapping(
+    model: str,
+    figma_candidates: List[str],
+    schema_fields: List[str],
+    user_prompt: Optional[str] = None,
+    seed_mapping: Optional[Dict[str, List[str]]] = None,
+    max_figma: int = 250,
+    max_fields: int = 500,
+) -> Optional[Dict[str, Any]]:
+    """
+    Ask Ollama to: (1) select headers from figma_candidates, (2) map each to up to 3 schema_fields.
+    Returns a dict like {"headers": [...], "mapping": {...}} or None on failure.
+    """
+    if not OLLAMA_OK:
+        return None
+
+    # Trim huge inputs to fit model context comfortably
+    figma_cands = _limit_list(list(dict.fromkeys(figma_candidates)), max_figma)
+    schema_list = list(dict.fromkeys(schema_fields))[:max_fields]
+
+    payload = {
+        "FIGMA_CANDIDATES": figma_cands,
+        "SCHEMA_FIELDS": schema_list,
+        "SEED_MAPPING": seed_mapping or {},
+        "USER_GUIDANCE": (user_prompt or "").strip()
+    }
+    user_msg = (
+        "Use the arrays below.\n"
+        "Choose headers ONLY from FIGMA_CANDIDATES; choose fields ONLY from SCHEMA_FIELDS.\n"
+        "If USER_GUIDANCE is present, follow it as long as it doesn’t violate the rules.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+    try:
+        resp = ollama.chat(model=model, messages=[
+            {"role": "system", "content": LLM_SYSTEM_FULL},
+            {"role": "user", "content": user_msg}
+        ])
+        txt = (resp.get("message") or {}).get("content", "").strip()
+        m = re.search(r"\{.*\}", txt, flags=re.S)  # extract the JSON object
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+
+        # Sanitize: enforce subsets
+        allowed_headers = set(figma_cands)
+        allowed_fields  = set(schema_list)
+
+        hdrs = [h for h in obj.get("headers", []) if isinstance(h, str) and h in allowed_headers]
+        mapping = {}
+        raw_map = obj.get("mapping", {}) if isinstance(obj.get("mapping", {}), dict) else {}
+        for h in hdrs:
+            arr = raw_map.get(h, [])
+            if not isinstance(arr, list):
+                arr = []
+            clean = [f for f in arr if isinstance(f, str) and f in allowed_fields]
+            mapping[h] = clean[:3]
+
+        return {"headers": hdrs, "mapping": mapping}
     except Exception:
         return None
 
@@ -415,7 +563,7 @@ def _collect_candidates_from_body(body: Any) -> Tuple[List[Any], List[Any], Dict
 
     return figma_cands, schema_cands, dbg
 
-# =========================== Core handler (shared by all POST aliases) ===========================
+# =========================== Utilities for explicit preference ===========================
 
 def _prefer_explicit_over_detect(wrapper: dict) -> Tuple[Optional[Any], Optional[Any]]:
     """
@@ -443,35 +591,36 @@ def _prefer_explicit_over_detect(wrapper: dict) -> Tuple[Optional[Any], Optional
         schema = None
     return figma, schema
 
+# =========================== Core handler (LLM-first) ===========================
+
 def _headers_map_core():
     """
     Accepts messy JSON and auto-detects Figma vs OpenAPI blobs.
     Prefers explicitly provided figma_jsons/schema_jsons if present.
-    Returns headers harvested from Figma and top-3 schema fields for each header.
+    LLM-first: Ollama selects headers from candidates and maps to schema fields.
     """
     try:
-        # Try standard JSON first; if missing/invalid, fall back to permissive parse
+        # Parse request body (permissive)
         body = request.get_json(silent=True)
         if body is None:
             raw = request.get_data(as_text=True)
             body = loose_json_loads(raw)
 
-        # Accept list-or-dict; if list, wrap so we can scan uniformly
         if not isinstance(body, (dict, list)):
             return jsonify({"error": "Request body must be a JSON object or array."}), 400
         wrapper = {"payload": body} if isinstance(body, list) else body
 
-        # 0) Prefer explicitly provided blobs when present
+        # Prefer explicitly provided blobs
         figma_explicit, schema_explicit = (None, None)
         if isinstance(wrapper, dict):
             figma_explicit, schema_explicit = _prefer_explicit_over_detect(wrapper)
 
-        # 1) Collect candidates via scanning (handles messy placements)
-        figma_cands, schema_cands, dbg = _collect_candidates_from_body(wrapper)
+        # Collect candidates via scanning (handles messy placements)
+        figma_cands_all, schema_cands_all, dbg = _collect_candidates_from_body(wrapper)
 
-        # 2) Resolve final figma/schema
-        figma = figma_explicit or (figma_cands[0] if figma_cands else None)
-        schema = schema_explicit or (schema_cands[0] if schema_cands else None)
+        # Resolve final figma/schema objects
+        figma = figma_explicit or (figma_cands_all[0] if figma_cands_all else None)
+        schema = schema_explicit or (schema_cands_all[0] if schema_cands_all else None)
 
         if figma is None:
             return jsonify({"error": "No Figma-like JSON detected (and none provided in figma_jsons).",
@@ -480,29 +629,48 @@ def _headers_map_core():
             return jsonify({"error": "No OpenAPI/Schema-like JSON detected (and none provided in schema_jsons).",
                             "debug": dbg}), 400
 
-        # 3) Extract headers & schema fields
-        headers = extract_figma_headers(figma)
-        fields = collect_schema_fields(schema)
+        # --- Build candidate label list from Figma (values + keys) ---
+        figma_candidates = extract_figma_headers(figma)  # smart harvesting (values, keys, columns, etc.)
 
-        # 4) Map each header to top-3 fields (optionally refine with LLM)
-        draft = {h: top_k_fields(h, fields, k=3) for h in headers}
-        if isinstance(wrapper, dict):
-            use_llm = bool(wrapper.get("use_llm", True))
-            model = wrapper.get("llm_model", "llama3")
+        # --- Build schema field list from OpenAPI ---
+        schema_fields = collect_schema_fields(schema)
+
+        # --- Heuristic seed mapping (used as hints for the LLM) ---
+        seeds = {h: [f for f in top_k_fields(h, schema_fields, k=3)] for h in figma_candidates}
+
+        # --- Flags from request ---
+        use_llm     = bool(wrapper.get("use_llm", True)) if isinstance(wrapper, dict) else True
+        require_llm = bool(wrapper.get("require_llm", False)) if isinstance(wrapper, dict) else False
+        model       = wrapper.get("llm_model", "llama3") if isinstance(wrapper, dict) else "llama3"
+        user_prompt = wrapper.get("prompt", "") if isinstance(wrapper, dict) else ""
+
+        # --- LLM-first extraction ---
+        used_llm = False
+        result = None
+        if use_llm:
+            result = ollama_headers_and_mapping(model, figma_candidates, schema_fields, user_prompt, seeds)
+            used_llm = result is not None
+
+        # --- Fallback to heuristics if LLM unavailable or returns nothing ---
+        if not result:
+            if require_llm and not OLLAMA_OK:
+                return jsonify({"error": "Ollama not available (require_llm=true). Start Ollama or set require_llm=false."}), 503
+            headers = figma_candidates
+            mapping = {h: [f for f in top_k_fields(h, schema_fields, k=3)] for h in headers}
         else:
-            use_llm, model = True, "llama3"
-
-        final = refine_with_llm(model, headers, fields, draft) if (use_llm and OLLAMA_OK) else None
+            headers = result["headers"]
+            mapping = result["mapping"]
 
         return jsonify({
             "headers": headers,
-            "mapping": final or draft,
+            "mapping": mapping,
             "debug": {
-                "used_llm": bool(final is not None),
-                "figma_candidates": len(figma_cands),
-                "schema_candidates": len(schema_cands),
-                "keys_seen": sorted(set(dbg.get("keys_seen", [])))[:200],  # cap to keep response readable
-                "notes": "Permissive parsing enabled. Explicit figma_jsons/schema_jsons preferred over auto-detect."
+                "used_llm": used_llm,
+                "figma_candidates": len(figma_cands_all),
+                "schema_candidates": len(schema_cands_all),
+                "figma_label_candidates_used": len(figma_candidates),
+                "schema_fields_used": len(schema_fields),
+                "notes": "LLM-first extraction. Headers chosen only from figma candidates; fields only from schema.",
             }
         }), 200
 
@@ -525,7 +693,9 @@ def headers_map_help():
             "figma_jsons": ["<Figma JSON object or string>"],
             "schema_jsons": ["<OpenAPI JSON object or string>"],
             "use_llm": True,
-            "llm_model": "llama3"
+            "require_llm": False,
+            "llm_model": "llama3",
+            "prompt": "optional guidance to the model"
         },
         "examples": [
             "POST /api/headers-map",

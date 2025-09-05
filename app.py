@@ -52,6 +52,23 @@ def _extract_bracketed(s: str) -> Optional[str]:
             cand = arr
     return cand
 
+def _is_junky_label(s: str) -> bool:
+    sl = s.lower()
+    # obvious instance/variant IDs like I61:1669;59:17061;...
+    if ";" in s or re.search(r"[A-Za-z]?\d+[:;]\d+", s):
+        return True
+    # more digits than letters -> likely an ID
+    if len(re.findall(r"\d", s)) > len(re.findall(r"[A-Za-z]", s)):
+        return True
+    # variant/style/templating words we don't want as headers
+    if any(w in sl for w in ["template", "variant", "private/", "light", "dark"]):
+        return True
+    # generic component names
+    if any(w in sl for w in ["page header", "list item", "container", "frame meta"]):
+        return True
+    return False
+
+
 def loose_json_loads(s: str) -> Any:
     """
     Best-effort parser for 'JSON-ish' text:

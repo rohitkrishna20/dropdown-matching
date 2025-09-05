@@ -150,6 +150,41 @@ def get_payload(req):
         return payload
     return None
 
+def _ensure_min_headers(headers: list[str], rhs_meta: list[dict], min_k: int = 5) -> list[str]:
+    """
+    Fallback-only: guarantee at least `min_k` headers.
+    Prefer short, common, dashboard-friendly labels; bias toward ones
+    that overlap your RHS leaves. DOES NOT run unless you call it.
+    """
+    if len(headers) >= min_k:
+        return headers
+
+    # Keep these short and generic; first 5 are the ones you asked for
+    seeds = ["Name", "Dashboard", "Overview", "Status", "Date",
+             "Source", "Created", "Account", "Owner"]
+
+    out = list(headers)
+    seen = { _norm(h) for h in out }
+
+    def _push(label: str):
+        if len(out) < min_k and _norm(label) not in seen:
+            out.append(label)
+            seen.add(_norm(label))
+
+    # Phase 1: seeds with *any* RHS affinity (weak is fine in fallback)
+    for s in seeds:
+        if len(out) >= min_k: break
+        if has_rhs_affinity(s, rhs_meta, min_overlap=0.10):
+            _push(s)
+
+    # Phase 2: if still short, top up with remaining seeds
+    for s in seeds:
+        if len(out) >= min_k: break
+        _push(s)
+
+    return out[:min_k]
+
+
 # -------------------- Figma harvest --------------------
 def extract_figma_text(figma_json: dict) -> list[str]:
     """
@@ -658,6 +693,9 @@ def api_find_fields():
         if not headers and figma_labels:
             fallback = sorted(figma_labels, key=_shape_score)
             headers = [x for x in fallback if _valid_figma_label(x)][:8]
+            
+        if not headers:
+            headers = _ensure_min_headers([], rhs_meta, min_k=5)
 
         headers = headers[:15]
 

@@ -1,658 +1,348 @@
+# app.py
+from __future__ import annotations
 from flask import Flask, request, jsonify
-from langchain_community.vectorstores import FAISS
-from langchain_ollama import OllamaEmbeddings
-from langchain_core.documents import Document
-import json, re, os, requests, ollama
+import json, re, math
+from typing import Any, Dict, List, Tuple, Iterable, Optional
+
+try:
+    import ollama  # optional (local, open-source)
+    OLLAMA_OK = True
+except Exception:
+    OLLAMA_OK = False
 
 app = Flask(__name__)
 
-FEEDBACK_PATH = "feedback_memory.json"
-OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+# ----------------------------- Utilities -----------------------------
 
-# -------------------- Feedback store --------------------
-def load_feedback():
-    if os.path.exists(FEEDBACK_PATH):
-        try:
-            with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    data.setdefault("correct", {})
-                    data.setdefault("incorrect", {})
-                    data.setdefault("last_run", {})
-                    return data
-        except Exception as e:
-            print(f"⚠️ load_feedback: {e}")
-    return {"correct": {}, "incorrect": {}, "last_run": {}}
-
-def save_feedback():
+def force_decode(x: Any) -> Any:
+    """
+    Accepts: dict/list (already-parsed JSON), JSON string, or base64-encoded JSON string.
+    Returns: Python object (dict/list).
+    """
+    if isinstance(x, (dict, list)):
+        return x
+    if isinstance(x, (bytes, bytearray)):
+        x = x.decode("utf-8", errors="ignore")
+    s = str(x)
+    # Try plain JSON first
     try:
-        with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
-            json.dump(feedback_memory, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ save_feedback: {e}")
-
-feedback_memory = load_feedback()
-
-# -------------------- Text utils --------------------
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip().lower()) if isinstance(s, str) else s
-
-_UI_STOP = {"dashboard", "page", "view", "panel", "tile", "card", "module", "section", "tab"}
-
-def _tokens_core(s: str) -> list[str]:
-    if not isinstance(s, str): 
-        return []
-    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)     # camelCase -> camel Case
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", s)       # keep alnum separators
-    return [t for t in s.strip().lower().split() if t]
-
-def _tokens(s: str) -> list[str]:
-    toks = _tokens_core(s)
-    return [t for t in toks if t not in _UI_STOP]
-
-def _jaccard(a: set, b: set) -> float:
-    if not a and not b: return 0.0
-    return len(a & b) / max(1, len(a | b))
-
-def _is_mostly_upper(s: str) -> bool:
-    letters = [c for c in s if c.isalpha()]
-    if not letters: return False
-    upp = sum(c.isupper() for c in letters)
-    return upp / len(letters) >= 0.8 and len(letters) >= 4
-
-def _is_mostly_numeric(s: str) -> bool:
-    digits = sum(c.isdigit() for c in s)
-    return digits / max(1, len(s)) >= 0.4
-
-ID_BASE62 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
-
-def _looks_like_hex_id(s: str) -> bool:
-    w = s.strip()
-    return bool(re.fullmatch(r"[0-9a-fA-F]{10,}", w))
-
-def _looks_like_base62_id(s: str) -> bool:
-    w = s.strip()
-    return len(w) >= 10 and " " not in w and all(c in ID_BASE62 for c in w)
-
-def _looks_like_id(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    t = s.strip()
-    if not t: return False
-    if " " not in t and len(t) >= 8:
-        alnum_ratio = sum(c.isalnum() for c in t) / len(t)
-        if alnum_ratio >= 0.9 and any(c.isdigit() for c in t):
-            return True
-    if _looks_like_hex_id(t) or _looks_like_base62_id(t):
-        return True
-    if re.fullmatch(r"[A-Za-z0-9_-]{12,}", t):
-        return True
-    return False
-
-def _is_headerish(s: str) -> bool:
-    if not isinstance(s, str): return False
-    w = s.strip()
-    if not w: return False
-    if _looks_like_id(w): return False
-    if any(ch.isdigit() for ch in w): return False
-    if "_" in w or "#" in w: return False
-    parts = w.split()
-    if not (1 <= len(parts) <= 3): return False
-    if any(len(p) > 28 for p in parts): return False
-    if _is_mostly_upper(s): return False
-    if _is_mostly_numeric(s): return False
-    if not any(c.isalpha() for c in s): return False
-    return True
-
-def _valid_figma_label(t: str) -> bool:
-    if not isinstance(t, str): return False
-    s = t.strip()
-    if not s: return False
-    # drop obvious IDs / codes / refs
-    if _looks_like_hex_id(s) or _looks_like_base62_id(s): return False
-    # shape constraints for column headers
-    if "_" in s or "#" in s: return False
-    # allow hyphens (Figma titles often have en/em dashes)
-    # if "-" in s: return False   # ← removed
-    if len(s) > 30: return False
-    if len(s.split()) > 4: return False
-    return _is_headerish(s)
-
-
-# -------------------- Feedback blocklist --------------------
-def build_blocklist() -> set:
-    blocked = set()
-    inc = feedback_memory.get("incorrect", {}) or {}
-    for hdr, pats in inc.items():
-        blocked.add(_norm(hdr))
-        if isinstance(pats, list):
-            for p in pats:
-                if isinstance(p, str):
-                    blocked.add(_norm(p))
-    return blocked
-
-# -------------------- JSON helpers --------------------
-def force_decode(raw):
-    try:
-        rounds = 0
-        while isinstance(raw, str) and rounds < 6:
-            rounds += 1
-            try:
-                raw = json.loads(raw)
-                continue
-            except Exception:
-                break
-        return raw
+        return json.loads(s)
     except Exception:
-        return raw
-
-def get_payload(req):
-    payload = req.get_json(silent=True)
-    if isinstance(payload, dict) and payload:
-        return payload
-    return None
-
-def _root_token(h: str) -> str:
-    t = _tokens(h)
-    return t[0] if t else ""
-
-
-# -------------------- Figma harvest --------------------
-def extract_figma_text(figma_json: dict) -> list[str]:
-    """
-    Preferred: TEXT nodes' 'characters'.
-    Fallback (same pass): any 'name' values (Frame/Group/Component) -> split camel/kebab/_ and clean.
-    """
-    out = []
-
-    def is_numeric(t: str) -> bool:
-        cleaned = t.replace(",", "").replace("%", "").replace("$", "").strip()
-        return cleaned.replace(".", "").isdigit()
-
-    def add_clean(s: str):
-        if not isinstance(s, str): return
-        s2 = s.strip()
-        if not s2: return
-        # convert camel/kebab/underscores to spaces, titlecase where appropriate
-        s_norm = " ".join(_tokens_core(s2)).strip()
-        s_norm = re.sub(r"\s+", " ", s_norm)
-        s_title = " ".join(w.capitalize() for w in s_norm.split())
-        # keep both original (if looks like plain text) and the cleaned title
-        cands = [s2, s_title]
-        for c in cands:
-            if c and not is_numeric(c) and _is_headerish(c):
-                out.append(c)
-
-    def walk(node):
-        if isinstance(node, dict):
-            if node.get("type") == "TEXT":
-                val = node.get("characters", "")
-                if isinstance(val, str):
-                    add_clean(val)
-            # also allow 'name' fields because some dashboard files lack TEXT nodes
-            nm = node.get("name")
-            if isinstance(nm, str):
-                add_clean(nm)
-            for v in node.values():
-                if isinstance(v, (dict, list)):
-                    walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(figma_json)
-
-    # de-dup preserve order + apply validator
-    seen, uniq = set(), []
-    for s in out:
-        if _valid_figma_label(s):
-            if s not in seen:
-                seen.add(s); uniq.append(s)
-    return uniq
-
-# -------------------- RHS field universe --------------------
-def extract_all_keys(data, prefix=""):
-    keys = set()
-    if isinstance(data, dict):
-        for k, v in data.items():
-            full = f"{prefix}.{k}" if prefix else k
-            keys.add(full)
-            keys.update(extract_all_keys(v, full))
-    elif isinstance(data, list):
-        for item in data:
-            keys.update(extract_all_keys(item, prefix))
-    return keys
-
-def field_leaf(path: str) -> str:
-    """Prefer token after last '.properties.'; else last dotted token; strip x- extensions."""
-    if not isinstance(path, str) or not path: return ""
-    parts = path.split(".")
+        pass
+    # Try base64 -> JSON
+    import base64
     try:
-        last_prop = max(i for i, t in enumerate(parts) if t == "properties")
-        j = last_prop + 1
-        if j < len(parts):
-            leaf = parts[j]
-            if leaf == "items" and j + 1 < len(parts):
-                leaf = parts[j + 1]
-        else:
-            leaf = parts[-1]
-    except ValueError:
-        leaf = parts[-1]
-    if leaf.startswith("x-"):
-        for tok in reversed(parts):
-            if not tok.startswith("x-"):
-                leaf = tok
-                break
-    return leaf
+        s2 = base64.b64decode(s).decode("utf-8", errors="ignore")
+        return json.loads(s2)
+    except Exception:
+        raise ValueError("Could not parse JSON (nor base64-encoded JSON).")
 
-# ---- schema aliasing: turn long OpenAPI-ish ids into human words ----
-def _id_tokens(s: str):
-    s1 = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-    return [t for t in re.split(r"[^A-Za-z0-9]+", s1) if t]
 
-def _schema_alias(s: str) -> str:
-    toks = _id_tokens(s)
-    drop = {"data","dy","homepage","home","mgr","vbc","get","one","all","put","post",
-            "del","delete","response","resp","bo","id","list","key","schema","schemas","components"}
-    core = [t for t in toks if t.lower() not in drop]
-    low = [t.lower() for t in toks]
-    if "sales" in low and "dashboard" in low:
-        return "Sales Dashboard"
-    if core:
-        head = [core[0].capitalize()] + [c.lower() for c in core[1:3]]
-        return " ".join(head)
-    return s
+# ----------------------------- Figma harvest -----------------------------
 
-def collect_rhs_paths_and_leaves(data):
-    paths = sorted(list(extract_all_keys(data)))
-    meta = []
-    for p in paths:
-        leaf = field_leaf(p)
-        if not leaf: 
-            continue
-        meta.append({"path": p, "leaf": leaf})
-        alias = _schema_alias(leaf)
-        if alias and alias != leaf:
-            meta.append({"path": p, "leaf": alias, "alias_of": leaf})
-    return meta
+GENERIC_BAD_WORDS = {
+    "text","label","button","primary","action","subtitle","search","timestamp","icon",
+    "open in gmail","open","menu","close","cancel","ok"
+}
 
-def build_faiss_on_leaves(rhs_meta):
-    docs = []
-    for m in rhs_meta:
-        docs.append(Document(page_content=m["leaf"], metadata={"path": m["path"]}))
-    return FAISS.from_documents(docs, OllamaEmbeddings(model=OLLAMA_MODEL))
+_WORD = re.compile(r"[A-Za-z0-9]+")
+def _tokens(s: str) -> List[str]:
+    return [t.lower() for t in _WORD.findall(s)]
 
-# -------------------- LLM prompt --------------------
-def make_prompt_from_figma(labels: list[str]) -> str:
-    blob = "\n".join(f"- {t}" for t in labels)
-    incorrect = set(p for pats in feedback_memory["incorrect"].values() for p in pats)
-    correct   = set(p for pats in feedback_memory["correct"].values()   for p in pats)
-    avoid = ("\nAvoid patterns like:\n" + "\n".join(f"- {p}" for p in incorrect)) if incorrect else ""
-    prefer = ("\nPrefer patterns like:\n" + "\n".join(f"- {p}" for p in correct)) if correct else ""
+def _is_numbery(s: str) -> bool:
+    z = s.strip().replace(",", "").replace("%", "").replace("$", "")
+    return z.replace(".", "", 1).isdigit()
 
-    return f"""
-Extract TABLE COLUMN HEADERS from the candidate label list.
-
-Rules (follow ALL strictly):
-- Use ONLY labels that appear in the list (do not invent).
-- Keep them short (1–3 words), human-readable, column-like (not actions/menus/status).
-- ALWAYS RETURN an output - never have any empty headers!
-- DO NOT select labels that contain an underscore "_" or a hash "#".
-- Avoid generic technical/container words such as: components, schemas, properties, paths, tags, servers, definitions, refs.
-
-{avoid}
-{prefer}
-
-Return STRICT JSON: keys = your normalized headers, values = the EXACT matched label.
-
-Candidate labels:
-{blob}
-""".strip()
-
-# -------------------- Matching helpers --------------------
-def _header_aliases(h: str) -> list[str]:
-    hn = _norm(h)
-    aliases = [hn]
-    map_simple = {
-        "at risk": "risk",
-        "risk status": "risk",
-        "created on": "created",
-        "created at": "created",
-        "source type": "source",
-        "primary flag": "primary",
-        "account name": "account",
-        "company": "account",
-    }
-    if hn in map_simple:
-        aliases.append(map_simple[hn])
-    ht = _tokens_core(hn)
-    if len(ht) == 2 and ht[1] in _UI_STOP:
-        aliases.append(ht[0])
-    return list(dict.fromkeys(aliases))
-
-def has_rhs_affinity(header: str, rhs_meta: list[dict], min_overlap: float = 0.30) -> bool:
-    if not isinstance(header, str) or not header.strip():
+def _titlecaseish(s: str) -> bool:
+    # short heuristic: a header-ish label is often Title Case or ALL CAPS
+    letters = re.sub(r"[^A-Za-z]+","", s)
+    if not letters:
         return False
-    candidates = _header_aliases(header)
+    return s.istitle() or s.isupper()
 
-    for cand in candidates:
-        htoks = set(_tokens(cand))
-        hnorm = _norm(cand)
-        for m in rhs_meta:
-            leaf = m.get("leaf") or ""
-            if not leaf: continue
-            ln = _norm(leaf)
-            ltoks = set(_tokens(leaf))
+def _header_likeliness(s: str) -> float:
+    """Score how 'header-like' a text string is, w/o any hard-coded titles."""
+    s_clean = s.strip()
+    if not s_clean:
+        return 0.0
+    if _is_numbery(s_clean):
+        return 0.0
+    if len(s_clean) < 2 or len(s_clean) > 40:
+        return 0.0
 
-            if ln == hnorm:
-                return True
-            if hnorm and (hnorm in ln or ln in hnorm):
-                return True
-            if htoks and ltoks and _jaccard(htoks, ltoks) >= min_overlap:
-                return True
-    return False
+    toks = _tokens(s_clean)
+    if not toks:
+        return 0.0
+    if any(t in GENERIC_BAD_WORDS for t in toks):
+        return 0.0
 
-def rank_candidates_for(header: str, rhs_meta: list[dict], field_index, k: int = 3):
-    variants = _header_aliases(header)
-    scored = []
+    # heuristics: shorter phrases (1–5 tokens), contains letters, title-case-ish
+    score = 0.0
+    score += 0.35 if len(toks) <= 5 else 0.0
+    score += 0.25 if _titlecaseish(s_clean) else 0.0
+    # reward meaningful tokens (no all-stopword-y)
+    score += min(0.4, 0.1 * sum(1 for t in toks if len(t) >= 3))
+    return score
 
-    def score_pair(hcand: str, leaf: str):
-        hnorm = _norm(hcand)
-        htoks = set(_tokens(hcand))
-        ln = _norm(leaf)
-        ltoks = set(_tokens(leaf))
-        if ln == hnorm: return 0.0
-        if hnorm and (hnorm in ln or ln in hnorm): return 0.25
-        j = _jaccard(htoks, ltoks)
-        if j > 0: return 1.0 - min(0.99, j)
-        return None
+def _walk_figma(node: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _walk_figma(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_figma(v)
 
-    for m in rhs_meta:
-        leaf = m.get("leaf") or ""
-        best = None
-        for hc in variants:
-            s = score_pair(hc, leaf)
-            if s is not None:
-                best = s if best is None else min(best, s)
-        if best is not None:
-            # tiny preference for alias leaves (human readable)
-            if "alias_of" in m:
-                best = max(0.0, best - 0.05)  # lower score = better
-            scored.append((best, m["path"], leaf))
-
-    scored.sort(key=lambda x: x[0])
-    out = [{"field": p, "field_short": leaf, "score": float(s)} for (s, p, leaf) in scored[:k]]
-
-    if len(out) < k:
+def extract_figma_headers(figma: Dict[str, Any]) -> List[str]:
+    """
+    Collect all TEXT node 'characters' plus select 'name' fields when useful,
+    then filter by header-likeliness and dedupe by normalized form.
+    """
+    candidates: List[str] = []
+    for node in _walk_figma(figma):
         try:
-            acc = []
-            for hc in variants:
-                acc.extend(field_index.similarity_search_with_score(hc, k=k*2))
-            seen_paths = {x["field"] for x in out}
-            for doc, dist in acc:
-                pth = doc.metadata.get("path", "")
-                leaf = doc.page_content
-                if pth in seen_paths:
-                    continue
-                out.append({"field": pth, "field_short": leaf, "score": float(dist) + 0.5})
-                seen_paths.add(pth)
-                if len(out) >= k:
-                    break
+            if node.get("type") == "TEXT":
+                txt = (node.get("characters") or "").strip()
+                if txt and txt.lower() != "text" and not _is_numbery(txt):
+                    candidates.append(txt)
         except Exception:
             pass
 
-    out.sort(key=lambda x: x.get("score", 1e9))
-    return out[:k]
+        # Fallback to 'name' fields for things like table headers if characters are absent
+        nm = node.get("name")
+        if isinstance(nm, str):
+            nm_s = nm.strip()
+            if nm_s and len(nm_s) <= 40 and not _is_numbery(nm_s):
+                # Avoid very technical layer names with slashes
+                if "/" not in nm_s and nm_s.lower() not in GENERIC_BAD_WORDS:
+                    candidates.append(nm_s)
 
-# -------------------- Ollama info --------------------
-def get_ollama_info():
+    # Score & keep header-like
+    scored = [(s, _header_likeliness(s)) for s in candidates]
+    keep = [s for s, sc in scored if sc >= 0.45]
+
+    # normalize & dedupe (favor longest canonical variant per root word)
+    norm = lambda x: re.sub(r"\s+", " ", x).strip()
+    seen_roots, out = set(), []
+    def root_key(s: str) -> str:
+        tt = _tokens(s)
+        return tt[0] if tt else norm(s).lower()
+    for h in sorted({norm(s) for s in keep}, key=len):  # stable-ish
+        r = root_key(h)
+        if r in seen_roots:
+            continue
+        seen_roots.add(r)
+        out.append(h)
+    return out
+
+
+# ----------------------------- OpenAPI field mining -----------------------------
+
+def collect_schema_fields(openapi: Dict[str, Any]) -> List[str]:
+    """
+    Collect candidate field names from components.schemas.*.properties.*
+    Also include top-level example 'fields' if present.
+    """
+    fields = set()
+
+    # 1) components.schemas.*.properties
+    comps = openapi.get("components", {}).get("schemas", {})
+    for schema_obj in comps.values():
+        props = (schema_obj or {}).get("properties", {})
+        for k in props.keys():
+            fields.add(str(k))
+
+    # 2) example fields from 'paths'->...->parameters (if present)
+    paths = openapi.get("paths", {}) or {}
+    for p in paths.values():
+        for method in (p or {}).values():
+            for prm in (method or {}).get("parameters", []) or []:
+                if prm.get("name") == "fields":
+                    # nothing else to mine here, but keeping door open for future examples
+                    pass
+
+    return sorted(fields)
+
+
+# ----------------------------- Similarity & mapping -----------------------------
+
+def jaccard(a: Iterable[str], b: Iterable[str]) -> float:
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+def char_ngram_tokens(s: str, n: int = 3) -> List[str]:
+    s2 = re.sub(r"[^A-Za-z0-9]+", " ", s.lower())
+    s2 = re.sub(r"\s+", " ", s2).strip()
+    if len(s2) < n:
+        return [s2] if s2 else []
+    return [s2[i:i+n] for i in range(len(s2)-n+1)]
+
+SYNONYMS = {
+    # lightweight, non-hardcoded-to-your-app synonyms to help generic mapping
+    "expected closure": {"close", "close date", "expected close", "expected closure"},
+    "account": {"account", "customer", "client"},
+    "total value": {"amount", "total", "value", "revenue"},
+    "sales stage": {"stage", "status", "pipeline stage"},
+    "win probability": {"probability", "win", "confidence", "likelihood"},
+    "ai score": {"ai", "score", "model score", "ai score"},
+    "created": {"created", "created date", "created_on", "created_at"},
+    "source": {"source", "channel", "lead source"},
+    "alerts": {"alert", "alerts", "flag", "at risk"},
+    "name": {"name", "title"},
+}
+
+def synonym_boost(hdr: str, fld: str) -> float:
+    h = " ".join(_tokens(hdr))
+    f = " ".join(_tokens(fld))
+    best = 0.0
+    for canon, alts in SYNONYMS.items():
+        if any(w in h for w in alts):
+            if any(w in f for w in alts):
+                best = max(best, 0.25)
+    return best
+
+def field_score(header: str, field: str) -> float:
+    # token-level and character-level overlaps
+    ht, ft = _tokens(header), _tokens(field)
+    s1 = jaccard(ht, ft)
+    s2 = jaccard(char_ngram_tokens(header), char_ngram_tokens(field))
+    s3 = synonym_boost(header, field)
+    # blend
+    return 0.55*s1 + 0.35*s2 + s3
+
+def top_k_fields_for_header(header: str, fields: List[str], k: int = 3) -> List[Tuple[str, float]]:
+    scored = [(f, field_score(header, f)) for f in fields]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:k]
+
+
+# ----------------------------- (Optional) LLM refinement -----------------------------
+
+LLM_SYSTEM = (
+    "You map UI headers to schema field names. RULES:\n"
+    "- Only choose from the provided list of field names.\n"
+    "- Return compact JSON: {header: [field1, field2, field3], ...}\n"
+    "- If you cannot find matches, return an empty list for that header.\n"
+    "- Do not invent fields or headers.\n"
+)
+
+def refine_with_llm(model: str, headers: List[str], fields: List[str], draft: Dict[str, List[str]]) -> Optional[Dict[str, List[str]]]:
+    if not OLLAMA_OK:
+        return None
+    prompt = (
+        f"Headers:\n{json.dumps(headers, ensure_ascii=False)}\n\n"
+        f"SchemaFields:\n{json.dumps(fields, ensure_ascii=False)}\n\n"
+        f"DraftMapping (seeds):\n{json.dumps(draft, ensure_ascii=False)}\n\n"
+        "Re-rank each header's top 3 best fields (stick strictly to SchemaFields)."
+    )
     try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        if r.status_code == 200:
-            return {"ollama_host": OLLAMA_URL, "models": [m.get("name") for m in r.json().get("models", [])]}
-        return {"ollama_host": OLLAMA_URL, "error": f"status {r.status_code}"}
-    except Exception as e:
-        return {"ollama_host": OLLAMA_URL, "error": str(e)}
+        resp = ollama.chat(model=model, messages=[
+            {"role":"system", "content": LLM_SYSTEM},
+            {"role":"user", "content": prompt}
+        ])
+        txt = (resp.get("message") or {}).get("content","").strip()
+        # Extract JSON block
+        m = re.search(r"\{.*\}", txt, flags=re.S)
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+        # sanitize: ensure outputs are from fields
+        fields_set = set(fields)
+        clean = {}
+        for h, lst in obj.items():
+            if h not in headers or not isinstance(lst, list):
+                clean[h] = draft.get(h, [])
+                continue
+            clean[h] = [x for x in lst if x in fields_set][:3]
+            if len(clean[h]) < 3:
+                # top up from draft
+                for x in draft.get(h, []):
+                    if x in fields_set and x not in clean[h]:
+                        clean[h].append(x)
+                    if len(clean[h]) == 3:
+                        break
+        return clean
+    except Exception:
+        return None
 
-@app.get("/api/ollama_info")
-def api_ollama_info():
-    return jsonify(get_ollama_info())
 
-@app.post("/api/find_fields")
-def api_find_fields():
+# ----------------------------- API -----------------------------
+
+@app.post("/api/headers-map")
+def api_headers_map():
+    """
+    Request JSON:
+    {
+      "figma_jsons": [ ... one or more Figma JSON docs ... ],
+      "schema_jsons": [ ... one or more OpenAPI JSON docs ... ],
+      "use_llm": true,                # optional (default: true if ollama installed)
+      "llm_model": "llama3"           # optional, defaults to 'llama3' if use_llm
+    }
+    Response JSON:
+    {
+      "headers": ["Sales Dashboard", "Overview", "My To-do's", ...],
+      "mapping": { "Sales Dashboard": ["FieldA","FieldB","FieldC"], ... },
+      "debug": { "notes": "...", "used_llm": true/false }
+    }
+    """
     try:
-        raw = get_payload(request)
+        raw = request.get_json(force=True, silent=False)
         if not isinstance(raw, dict):
-            return jsonify({"error": "Request must include figma_json and data_json"}), 400
-        if "figma_json" not in raw or "data_json" not in raw:
-            return jsonify({"error": "Missing 'figma_json' or 'data_json' keys"}), 400
+            return jsonify({"error":"Body must be JSON object"}), 400
 
-        figma_json = force_decode(raw["figma_json"])
-        data_json  = force_decode(raw["data_json"])
+        figma_jsons = [force_decode(x) for x in raw.get("figma_jsons", [])]
+        schema_jsons = [force_decode(x) for x in raw.get("schema_jsons", [])]
+        if not figma_jsons or not schema_jsons:
+            return jsonify({"error":"Provide 'figma_jsons' and 'schema_jsons' arrays"}), 400
 
-        # RHS universe + FAISS index (readable matching only; no effect on header set)
-        rhs_meta = collect_rhs_paths_and_leaves(data_json)
-        field_index = build_faiss_on_leaves(rhs_meta)
+        # 1) harvest headers from all figmas
+        headers: List[str] = []
+        for fj in figma_jsons:
+            headers.extend(extract_figma_headers(fj))
+        # de-dup while preserving order
+        seen, headers = set(), [h for h in headers if not (h.lower() in seen or seen.add(h.lower()))]
 
-        # ---------- Figma harvest ONLY (TEXT.characters + node.name, cleaned) ----------
-        figma_labels = extract_figma_text(figma_json)
+        # 2) collect all fields from all OpenAPI docs
+        schema_fields: List[str] = []
+        seenf = set()
+        for sj in schema_jsons:
+            for f in collect_schema_fields(sj):
+                if f not in seenf:
+                    seenf.add(f)
+                    schema_fields.append(f)
 
-        # Emergency sweep (still Figma-only: harvest strings inside Figma JSON, not RHS)
-        if not figma_labels:
-            def _harvest_strings(node, bag):
-                if isinstance(node, dict):
-                    for v in node.values():
-                        if isinstance(v, str):
-                            s = v.strip()
-                            if 1 <= len(s) <= 40 and _is_headerish(s):
-                                bag.append(s)
-                        elif isinstance(v, (dict, list)):
-                            _harvest_strings(v, bag)
-                elif isinstance(node, list):
-                    for it in node:
-                        _harvest_strings(it, bag)
-
-            _tmp = []
-            _harvest_strings(figma_json, _tmp)
-            # basic hygiene
-            _BAD_TERMS = {"components", "schemas", "properties", "responses", "schema", "paths", "tags", "servers", "definitions", "refs"}
-            seen = set()
-            figma_labels = []
-            for s in _tmp:
-                if s in seen: 
-                    continue
-                seen.add(s)
-                if "_" in s or "#" in s: 
-                    continue
-                if _norm(s) in _BAD_TERMS: 
-                    continue
-                if _valid_figma_label(s):
-                    figma_labels.append(s)
-
-        # Final candidate pool: STRICTLY from Figma, validated, de-duplicated (exact by _norm)
-        cand_pool = []
-        seen_norm = set()
-        for lbl in figma_labels:
-            if _valid_figma_label(lbl):
-                n = _norm(lbl)
-                if n not in seen_norm:
-                    seen_norm.add(n)
-                    cand_pool.append(lbl)
-
-        # If Figma truly has nothing usable, return empty headers (strict guarantee)
-        if not cand_pool:
-            headers = []
-            matches = {}
-            return jsonify({"headers_extracted": headers, "matches": matches})
-
-        # ---------- Optional LLM pass (still Figma-only selection) ----------
-        headers = []
-        try:
-            prompt = make_prompt_from_figma(cand_pool)
-            out = ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": prompt}])
-            content = (out.get("message") or {}).get("content", "") or ""
-            parsed = {}
-            if content:
-                try:
-                    parsed = json.loads(content) or {}
-                except Exception:
-                    m = re.search(r"\{[\s\S]*?\}", content)
-                    if m:
-                        try:
-                            parsed = json.loads(m.group())
-                        except Exception:
-                            parsed = {}
-            if isinstance(parsed, dict):
-                norm_fig = {_norm(x): x for x in cand_pool}
-                for _, v in parsed.items():
-                    if isinstance(v, str):
-                        nv = _norm(v)
-                        if nv in norm_fig:
-                            headers.append(norm_fig[nv])
-        except Exception:
-            headers = []
-
-        # ---------- Fallback: purely heuristic ranking (still Figma-only) ----------
-        def _shape_score(s: str) -> float:
-            parts = s.strip().split()
-            L = sum(len(p) for p in parts)
-            alpha = sum(c.isalpha() for c in s)
-            shout = 1.0 if _is_mostly_upper(s) else 0.0
-            # lower is better
-            return L - 2.0*shout - 0.5*abs(len(parts)-2) - 0.25*alpha
-
-        if not headers:
-            headers = sorted(
-                cand_pool,
-                key=lambda x: (0 if has_rhs_affinity(x, rhs_meta, min_overlap=0.20) else 1,
-                               _shape_score(x))
-            )
-
-        # Belt & suspenders: ensure headers are a subset of Figma labels only
-        fig_set_norm = {_norm(x) for x in figma_labels}
-        headers = [h for h in headers if _norm(h) in fig_set_norm]
-
-        # Cap size (your existing max)
-        headers = headers[:15]
-
-        # ---------- Matches (RHS-only, read-only; does not affect headers) ----------
-        matches = {}
+        # 3) heuristic top-3 for each header
+        draft_map: Dict[str, List[str]] = {}
         for h in headers:
-            matches[h] = rank_candidates_for(h, rhs_meta, field_index, k=3)
+            top3 = [f for f,_ in top_k_fields_for_header(h, schema_fields, k=3)]
+            draft_map[h] = top3
 
-        # Save feedback context (safe: uses headers as chosen above)
-        feedback_memory["last_run"] = {}
-        for h in headers:
-            feedback_memory["correct"].setdefault(h, []).append(h)
-            feedback_memory["last_run"][h] = {
-                "matched_ui_label": h,
-                "figma_text": figma_labels,
-                "top_rhs_candidates": matches.get(h, [])
-            }
-        save_feedback()
-
-        # Runtime assertion: guarantee headers came from Figma
-        assert all(_norm(h) in fig_set_norm for h in headers), \
-            "Internal error: header not from Figma labels"
-
-        if request.args.get("debug") in {"1","true"}:
-            return jsonify({
-                "headers_extracted": headers,
-                "matches": matches,
-                "debug": {
-                    "figma_label_count": len(figma_labels),
-                    "figma_sample": figma_labels[:25],
-                    "rhs_paths_count": len(rhs_meta),
-                    "rhs_leaf_sample": [m["leaf"] for m in rhs_meta[:25]]
-                }
-            })
-
-        return jsonify({"headers_extracted": headers, "matches": matches})
-
-    except Exception as e:
-        return jsonify({"error": "Find fields failed", "details": str(e)}), 500
-
-# -------------------- API: feedback --------------------
-@app.post("/api/feedback")
-def api_feedback():
-    try:
-        body = request.get_json(force=True)
-        header = body.get("header")
-        status = body.get("status")  # "correct" | "incorrect"
-        if not header or status not in {"correct", "incorrect"}:
-            return jsonify({"error": "Invalid feedback format"}), 400
-
-        patterns = feedback_memory["correct"].get(header, [])
-
-        if status == "correct":
-            feedback_memory["correct"].setdefault(header, [])
-            for p in patterns:
-                if p not in feedback_memory["correct"][header]:
-                    feedback_memory["correct"][header].append(p)
-        else:
-            feedback_memory["incorrect"].setdefault(header, [])
-            if header not in feedback_memory["incorrect"][header]:
-                feedback_memory["incorrect"][header].append(header)
-            for p in patterns:
-                if p not in feedback_memory["incorrect"][header]:
-                    feedback_memory["incorrect"][header].append(p)
-            feedback_memory["correct"].pop(header, None)
-
-        ctx = (feedback_memory.get("last_run") or {}).get(header, {})
-        matched_ui = ctx.get("matched_ui_label")
-        rhs_cands  = ctx.get("top_rhs_candidates", [])
-        figma_sample = "\n".join((ctx.get("figma_text") or [])[:40])
-
-        explain_prompt = f"""
-Explain briefly and neutrally (3–5 sentences) how this header could be selected:
-focus on shape (short, human-like phrase), overlap with RHS leaf names, and general similarity.
-
-Header: {header}
-Matched UI label: {matched_ui}
-Top RHS candidates: {json.dumps(rhs_cands, ensure_ascii=False)}
-Sample UI labels:
-{figma_sample}
-""".strip()
-
-        try:
-            exp = ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": explain_prompt}])
-            explanation = exp["message"]["content"]
-        except Exception as oe:
-            explanation = f"(Explanation unavailable: {oe})"
-
-        save_feedback()
+        # 4) optional LLM re-ranking
+        use_llm = bool(raw.get("use_llm", True)) and OLLAMA_OK
+        model = raw.get("llm_model", "llama3")
+        final_map = refine_with_llm(model, headers, schema_fields, draft_map) if use_llm else None
+        mapping = final_map or draft_map
 
         return jsonify({
-            "header": header,
-            "status": status,
-            "patterns_used": patterns,
-            "explanation": explanation
-        })
+            "headers": headers,
+            "mapping": mapping,
+            "debug": {
+                "notes": "Headers are harvested only from Figma text; mapping chosen from schema fields via similarity, optionally refined by local LLM.",
+                "used_llm": bool(final_map is not None)
+            }
+        }), 200
 
     except Exception as e:
-        return jsonify({"error": "Feedback failed", "details": str(e)}), 500
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
-# -------------------- Root --------------------
+
+# ----------------------------- Local dev helper -----------------------------
 @app.get("/")
-def home():
-    return jsonify({
-        "message": "POST /api/find_fields with {figma_json, data_json}. "
-                   "Labels come from TEXT nodes first; if absent, we clean Figma 'name' fields. "
-                   "If Figma is sparse, we enrich with short RHS aliases that include Figma tokens. "
-                   "Matches are ranked lexically on RHS leaves (with schema aliases) and FAISS as backstop. "
-                   "POST /api/feedback with {header, status}. Add ?debug=1 to inspect."
-    })
+def root():
+    return "OK", 200
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "5000")))
-    args = parser.parse_args()
-    print(f"✅ API running at http://localhost:{args.port}")
-    try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
-        print("ℹ️  Ollama:", OLLAMA_URL, "ok" if r.status_code == 200 else f"status {r.status_code}")
-    except Exception as e:
-        print("ℹ️  Ollama:", OLLAMA_URL, f"error: {e}")
-    app.run(host="0.0.0.0", port=args.port, debug=True)
+    # Run:  FLASK_ENV=development python app.py
+    app.run(host="0.0.0.0", port=5000, debug=True)
